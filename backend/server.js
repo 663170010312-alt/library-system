@@ -42,19 +42,77 @@ const app = express();
 
 app.disable('x-powered-by');
 
+app.set('trust proxy', 1);
 
 /* =========================
    CORS
 ========================= */
 
+/* =========================
+   CORS
+========================= */
+
+const allowedOrigins = [
+  'http://localhost:3000',
+  'https://library-system-lemon-rho.vercel.app',
+];
+
 app.use(
   cors({
-    origin:
-      process.env.FRONTEND_URL ||
-      'http://localhost:3000',
+    origin: (
+      origin,
+      callback
+    ) => {
+      /*
+        request ที่ไม่มี Origin
+        เช่น LINE webhook / Postman
+      */
+      if (!origin) {
+        return callback(
+          null,
+          true
+        );
+      }
+
+      if (
+        allowedOrigins.includes(
+          origin
+        )
+      ) {
+        return callback(
+          null,
+          true
+        );
+      }
+
+      console.log(
+        'CORS blocked:',
+        origin
+      );
+
+      return callback(
+        new Error(
+          `CORS blocked: ${origin}`
+        )
+      );
+    },
+
+    methods: [
+      'GET',
+      'POST',
+      'PUT',
+      'PATCH',
+      'DELETE',
+      'OPTIONS',
+    ],
+
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'ngrok-skip-browser-warning',
+    ],
   })
 );
-
 
 /* =========================
    STATIC UPLOADS

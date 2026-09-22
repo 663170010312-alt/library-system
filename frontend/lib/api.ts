@@ -14,12 +14,18 @@ export async function api<T>(
 
   const response = await fetch(`${API_URL}${path}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token
-        ? { Authorization: `Bearer ${token}` }
-        : {}),
-    },
+   headers: {
+  'Content-Type': 'application/json',
+
+  'ngrok-skip-browser-warning': 'true',
+
+  ...(token
+    ? {
+        Authorization:
+          `Bearer ${token}`,
+      }
+    : {}),
+},
     body:
       body === undefined
         ? undefined
