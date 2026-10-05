@@ -130,6 +130,221 @@ async function replyMessage(
   }
 }
 
+/* =========================================================
+   FLEX MESSAGE - BOOK CAROUSEL
+========================================================= */
+
+async function replyBookFlexMessage(
+  replyToken,
+  books,
+  keyword,
+  quickReplyItems = [],
+  title = '📚 ผลการค้นหาหนังสือ'
+) {
+  // กรณีไม่พบหนังสือ ใช้ข้อความเดิม
+  if (!books.length) {
+    await replyMessage(
+      replyToken,
+      [
+        '🔎 ไม่พบหนังสือ',
+        '',
+        `คำค้นหา: ${keyword}`,
+        '',
+        'ลองค้นด้วยชื่อหนังสือ ผู้แต่ง หมวดหมู่ ISBN หรือเลขเรียกหนังสือ',
+      ].join('\n'),
+      quickReplyItems
+    );
+
+    return;
+  }
+
+  const bubbles = books.map((book) => {
+    const available =
+      Number(book.available_copies || 0);
+
+    const infoContents = [
+      {
+        type: 'text',
+        text: String(book.title || 'ไม่ระบุชื่อหนังสือ'),
+        weight: 'bold',
+        size: 'lg',
+        wrap: true,
+        color: '#1F2937',
+      },
+
+      {
+        type: 'separator',
+        margin: 'md',
+      },
+
+      {
+        type: 'box',
+        layout: 'vertical',
+        margin: 'md',
+        spacing: 'sm',
+        contents: [
+          {
+            type: 'text',
+            text: `👤 ผู้แต่ง: ${book.author || '-'}`,
+            size: 'sm',
+            wrap: true,
+            color: '#555555',
+          },
+
+          {
+            type: 'text',
+            text: `📂 หมวดหมู่: ${book.category_name || 'ทั่วไป'}`,
+            size: 'sm',
+            wrap: true,
+            color: '#555555',
+          },
+        ],
+      },
+    ];
+
+    if (book.call_number) {
+      infoContents[2].contents.push({
+        type: 'text',
+        text: `🏷 เลขเรียก: ${book.call_number}`,
+        size: 'sm',
+        wrap: true,
+        color: '#555555',
+      });
+    }
+
+    if (book.isbn) {
+      infoContents[2].contents.push({
+        type: 'text',
+        text: `ISBN: ${book.isbn}`,
+        size: 'sm',
+        wrap: true,
+        color: '#777777',
+      });
+    }
+
+    infoContents.push({
+      type: 'box',
+      layout: 'vertical',
+      margin: 'lg',
+      paddingAll: '10px',
+      backgroundColor:
+        available > 0
+          ? '#E8F5E9'
+          : '#FDECEC',
+      cornerRadius: 'md',
+      contents: [
+        {
+          type: 'text',
+          text:
+            available > 0
+              ? `✅ ว่างสำหรับจอง ${available} เล่ม`
+              : '❌ ไม่มีหนังสือว่างสำหรับจอง',
+          size: 'sm',
+          weight: 'bold',
+          color:
+            available > 0
+              ? '#2E7D32'
+              : '#C62828',
+          wrap: true,
+        },
+      ],
+    });
+
+    return {
+      type: 'bubble',
+      size: 'kilo',
+
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        paddingAll: '16px',
+        contents: infoContents,
+      },
+
+      footer: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        paddingAll: '12px',
+        contents: [
+          {
+            type: 'button',
+            style: 'primary',
+            height: 'sm',
+            color: '#4CAF50',
+
+            action: {
+              type: 'uri',
+              label:
+                available > 0
+                  ? 'ดูรายละเอียด / จอง'
+                  : 'ดูรายละเอียด',
+              uri: `${libraryWebUrl}/books/${book.id}`,
+            },
+          },
+        ],
+      },
+    };
+  });
+
+  const message = {
+    type: 'flex',
+
+    altText:
+      `${title} - ${keyword}`,
+
+    contents: {
+      type: 'carousel',
+      contents: bubbles,
+    },
+  };
+
+  if (quickReplyItems.length) {
+    message.quickReply = {
+      items: quickReplyItems.map(
+        (label) => ({
+          type: 'action',
+
+          action: {
+            type: 'message',
+            label,
+            text: label,
+          },
+        })
+      ),
+    };
+  }
+
+  const response =
+    await fetch(
+      'https://api.line.me/v2/bot/message/reply',
+      {
+        method: 'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json',
+
+          Authorization:
+            `Bearer ${channelAccessToken}`,
+        },
+
+        body: JSON.stringify({
+          replyToken,
+          messages: [message],
+        }),
+      }
+    );
+
+  if (!response.ok) {
+    const errorText =
+      await response.text();
+
+    throw new Error(
+      `LINE Flex reply failed: ${response.status} ${errorText}`
+    );
+  }
+}
 
 /* =========================================================
    QUICK REPLY MENU
@@ -142,6 +357,7 @@ const mainQuickReply = [
   'หนังสือที่กำลังยืม',
   'ประวัติการยืม/คืน',
   'รายการเกินกำหนด',
+  'ดูค่าปรับ',
   'เข้าใช้งานเว็บไซต์',
   'เชื่อมบัญชี',
 ];
@@ -1046,6 +1262,93 @@ function formatMyOverdueLoans(loans) {
 
   return result.join('\n');
 }
+
+/* =========================================================
+   MY FINES
+========================================================= */
+
+function formatMyFines(loans) {
+  if (!loans.length) {
+    return [
+      '💰 ค่าปรับของฉัน',
+      '',
+      '✅ ขณะนี้ไม่มีค่าปรับจากการคืนหนังสือเกินกำหนด',
+    ].join('\n');
+  }
+
+  const result = [
+    '💰 ค่าปรับของฉัน',
+    '',
+  ];
+
+  let totalFine = 0;
+
+  loans.forEach((loan, index) => {
+    const effectiveDue =
+      loan.renewed_until ||
+      loan.due_at;
+
+    const overdueDays =
+      Number(
+        loan.overdue_days || 0
+      );
+
+    // ค่าปรับ 1 บาท / วัน
+    const fine =
+      overdueDays * 1;
+
+    totalFine += fine;
+
+    result.push(
+      `${index + 1}. ${loan.title}`
+    );
+
+    if (loan.copy_code) {
+      result.push(
+        `รหัสเล่ม: ${loan.copy_code}`
+      );
+    }
+
+    result.push(
+      `กำหนดคืน: ${new Date(
+        effectiveDue
+      ).toLocaleDateString(
+        'th-TH',
+        {
+          dateStyle: 'medium',
+        }
+      )}`
+    );
+
+    result.push(
+      `เกินกำหนด: ${overdueDays} วัน`
+    );
+
+    result.push(
+      `ค่าปรับ: ${fine} บาท`
+    );
+
+    if (
+      index <
+      loans.length - 1
+    ) {
+      result.push('');
+    }
+  });
+
+  result.push(
+    '',
+    '--------------------',
+    `💵 รวมค่าปรับโดยประมาณ: ${totalFine} บาท`,
+    '',
+    'หมายเหตุ:',
+    'ค่าปรับล่าช้า 1 บาท/วัน',
+    'ยอดจริงจะยืนยันเมื่อคืนหนังสือที่เคาน์เตอร์'
+  );
+
+  return result.join('\n');
+}
+
 /* =========================================================
    HANDLE MESSAGE
 ========================================================= */
@@ -1183,14 +1486,13 @@ async function handleMessage(event) {
         keyword
       );
 
-    await replyMessage(
-      event.replyToken,
-      formatBookSearch(
-        books,
-        keyword
-      ),
-      mainQuickReply
-    );
+   await replyBookFlexMessage(
+  event.replyToken,
+  books,
+  keyword,
+  mainQuickReply,
+  '📚 ผลการค้นหาหนังสือ'
+);
 
     return;
   }
@@ -1243,18 +1545,13 @@ async function handleMessage(event) {
         keyword
       );
 
-    await replyMessage(
-      event.replyToken,
-      [
-        '✨ หนังสือแนะนำ',
-        '',
-        formatBookSearch(
-          books,
-          keyword
-        ),
-      ].join('\n'),
-      mainQuickReply
-    );
+    await replyBookFlexMessage(
+  event.replyToken,
+  books,
+  keyword,
+  mainQuickReply,
+  '✨ หนังสือแนะนำ'
+);
 
     return;
   }
@@ -1599,83 +1896,80 @@ if (
 
   return;
 }
-   {
-    const lineUserId =
-      event.source?.userId;
 
 
-    if (!lineUserId) {
-      await replyMessage(
-        event.replyToken,
-        'ไม่สามารถตรวจสอบบัญชี LINE ได้',
-        mainQuickReply
-      );
+/* -----------------------------------------
+   ดูค่าปรับ
+----------------------------------------- */
 
-      return;
-    }
+if (
+  text === 'ดูค่าปรับ' ||
+  text === 'ค่าปรับ'
+) {
+  const lineUserId =
+    event.source?.userId;
 
-
-    const linkedAccount =
-      await getLinkedAccount(
-        lineUserId
-      );
-
-
-    if (!linkedAccount) {
-      await replyMessage(
-        event.replyToken,
-        [
-          '🔐 ยังไม่ได้เชื่อมบัญชีสมาชิกกับ LINE',
-          '',
-          'กรุณากด "เชื่อมบัญชี" ก่อนใช้งานเมนูนี้',
-        ].join('\n'),
-        mainQuickReply
-      );
-
-      return;
-    }
-
-
+  if (!lineUserId) {
     await replyMessage(
       event.replyToken,
-      [
-        '✅ ตรวจพบบัญชีสมาชิกแล้ว',
-        '',
-        `ชื่อ: ${linkedAccount.name}`,
-        '',
-        `เมนูที่เลือก: ${originalText}`,
-        '',
-        'กำลังพัฒนาเมนูนี้ต่อ',
-      ].join('\n'),
+      'ไม่สามารถตรวจสอบบัญชี LINE ได้',
       mainQuickReply
     );
-
 
     return;
   }
 
+  const linkedAccount =
+    await getLinkedAccount(
+      lineUserId
+    );
 
-  /* -----------------------------------------
-     DEFAULT
-  ----------------------------------------- */
+  if (!linkedAccount) {
+    await replyMessage(
+      event.replyToken,
+      [
+        '🔐 ยังไม่ได้เชื่อมบัญชีสมาชิกกับ LINE',
+        '',
+        'กรุณากด "เชื่อมบัญชี" ก่อนใช้งานเมนูนี้',
+      ].join('\n'),
+      mainQuickReply
+    );
+
+    return;
+  }
+
+  const overdueLoans =
+    await getMyOverdueLoans(
+      linkedAccount.user_id
+    );
 
   await replyMessage(
     event.replyToken,
-    [
-      'ไม่พบคำสั่งที่ต้องการ',
-      '',
-      'เลือกเมนูด้านล่างได้เลยครับ',
-    ].join('\n'),
+    formatMyFines(
+      overdueLoans
+    ),
     mainQuickReply
   );
 
-} // ปิด handleMessage(event)
+  return;
+}
 
 
-/* =========================================================
-   LINE WEBHOOK
-========================================================= */
+/* -----------------------------------------
+   DEFAULT
+----------------------------------------- */
 
+await replyMessage(
+  event.replyToken,
+  [
+    'ไม่พบคำสั่งที่ต้องการ',
+    '',
+    'เลือกเมนูด้านล่างได้เลยครับ',
+  ].join('\n'),
+  mainQuickReply
+);
+
+} 
 
 /* =========================================================
    LINE WEBHOOK
