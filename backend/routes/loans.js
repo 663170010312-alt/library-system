@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import {
   pool,
   positiveId,
@@ -10,6 +11,12 @@ import {
   authenticate,
   allow,
 } from './auth.js';
+
+import {
+  notifyLoanCreated,
+  notifyReturnCompleted,
+  notifyFinePaid,
+} from '../jobs/lineNotifications.js';
 
 const router = Router();
 
@@ -26,7 +33,6 @@ router.get(
   async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
-
         (
           SELECT COUNT(*)::int
           FROM book_copies
@@ -540,7 +546,7 @@ router.post(
       if (
         Number(
           stock.rows[0]?.available
-            ?? 0
+          ?? 0
         ) < 1
       ) {
         throw httpError(
@@ -647,6 +653,18 @@ router.post(
         'COMMIT'
       );
 
+      /* LINE - แจ้งเตือนยืมหนังสือสำเร็จ */
+      try {
+        await notifyLoanCreated(
+          rows[0].id
+        );
+      } catch (error) {
+        console.error(
+          `LINE loan notification failed: loan ${rows[0].id}`,
+          error
+        );
+      }
+
       res
         .status(201)
         .json({
@@ -668,8 +686,6 @@ router.post(
     }
   }
 );
-
-
 /* =========================================================
    RENEW LOAN
 
@@ -845,7 +861,6 @@ router.patch(
       );
     }
 
-
     let requestedDamageFee = 0;
 
     if (
@@ -855,7 +870,7 @@ router.patch(
       requestedDamageFee =
         Number(
           req.body.damage_fee
-            ?? 0
+          ?? 0
         );
 
       if (
@@ -870,7 +885,6 @@ router.patch(
         );
       }
     }
-
 
     const client =
       await pool.connect();
@@ -920,7 +934,6 @@ router.patch(
         );
       }
 
-
       if (loan.returned_at) {
         throw httpError(
           409,
@@ -954,7 +967,6 @@ router.patch(
           );
         }
       }
-
 
       const bookPrice =
         Number(
@@ -1061,7 +1073,6 @@ router.patch(
         lateFee
         + damageFee
         + lostFee;
-
 
       const paymentStatus =
         totalFine > 0
@@ -1197,6 +1208,15 @@ router.patch(
         'COMMIT'
       );
 
+      /* LINE - แจ้งเตือนคืนหนังสือสำเร็จ */
+      try {
+        await notifyReturnCompleted(id);
+      } catch (error) {
+        console.error(
+          `LINE return notification failed: loan ${id}`,
+          error
+        );
+      }
 
       res.json({
         ...returned.rows[0],
@@ -1225,8 +1245,6 @@ router.patch(
     }
   }
 );
-
-
 /* =========================================================
    PAY FINE - CASH
 ========================================================= */
@@ -1271,6 +1289,16 @@ router.patch(
       throw httpError(
         409,
         'ไม่พบค่าปรับที่สามารถชำระได้ หรือชำระแล้ว'
+      );
+    }
+
+    /* LINE - แจ้งเตือนชำระค่าปรับเงินสดสำเร็จ */
+    try {
+      await notifyFinePaid(id);
+    } catch (error) {
+      console.error(
+        `LINE cash payment notification failed: loan ${id}`,
+        error
       );
     }
 
@@ -1472,11 +1500,19 @@ router.patch(
       );
     }
 
+    /* LINE - แจ้งเตือนชำระค่าปรับ QR สำเร็จ */
+    try {
+      await notifyFinePaid(id);
+    } catch (error) {
+      console.error(
+        `LINE QR payment notification failed: loan ${id}`,
+        error
+      );
+    }
+
     res.json(rows[0]);
   }
 );
-
-
 /* =========================================================
    ADMIN REJECT QR SLIP
 ========================================================= */

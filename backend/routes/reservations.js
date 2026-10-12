@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import {
   pool,
   positiveId,
@@ -9,6 +10,10 @@ import {
   authenticate,
   allow,
 } from './auth.js';
+
+import {
+  notifyReservationCreated,
+} from '../jobs/lineNotifications.js';
 
 const router = Router();
 
@@ -348,6 +353,22 @@ router.post(
       await client.query(
         'COMMIT'
       );
+
+
+      /* =====================================================
+         LINE - แจ้งเตือนจองหนังสือสำเร็จ
+      ===================================================== */
+
+      try {
+        await notifyReservationCreated(
+          rows[0].id
+        );
+      } catch (error) {
+        console.error(
+          `LINE reservation notification failed: reservation ${rows[0].id}`,
+          error
+        );
+      }
 
 
       res

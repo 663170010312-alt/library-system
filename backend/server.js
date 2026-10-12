@@ -1,6 +1,9 @@
 import 'dotenv/config';
+
 import express from 'express';
 import cors from 'cors';
+import cron from 'node-cron';
+
 import { pool } from './db.js';
 
 import authRouter from './routes/auth.js';
@@ -13,6 +16,10 @@ import uploadsRouter from './routes/uploads.js';
 
 import lineRoutes from './routes/line.js';
 import lineLinkRoutes from './routes/lineLink.js';
+
+import {
+  runLineNotifications,
+} from './jobs/lineNotifications.js';
 
 
 /* =========================
@@ -44,9 +51,6 @@ app.disable('x-powered-by');
 
 app.set('trust proxy', 1);
 
-/* =========================
-   CORS
-========================= */
 
 /* =========================
    CORS
@@ -114,11 +118,11 @@ app.use(
   })
 );
 
+
 /* =========================
    STATIC UPLOADS
 ========================= */
 
-// เปิดให้ frontend เข้าถึงไฟล์ที่อัปโหลด
 app.use(
   '/uploads',
   express.static('uploads')
@@ -332,6 +336,34 @@ app.use(
 
 
 /* =========================
+   LINE NOTIFICATION SCHEDULE
+========================= */
+
+const lineNotificationTask =
+  cron.schedule(
+    '0 8 * * *',
+    async () => {
+      try {
+        await runLineNotifications();
+      } catch (error) {
+        console.error(
+          'LINE scheduled notification failed:',
+          error
+        );
+      }
+    },
+    {
+      timezone:
+        'Asia/Bangkok',
+    }
+  );
+
+console.log(
+  '✅ LINE notification schedule: every day at 08:00 Asia/Bangkok'
+);
+
+
+/* =========================
    START SERVER
 ========================= */
 
@@ -361,6 +393,11 @@ const server =
 ========================= */
 
 async function shutdown() {
+  /*
+    หยุด cron ก่อนปิด server
+  */
+  lineNotificationTask.stop();
+
   server.close(
     async () => {
       await pool.end();
