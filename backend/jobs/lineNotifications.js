@@ -410,28 +410,46 @@ export async function notifyReturnCompleted(
     return false;
   }
 
-  const text =
+ const fineItems = [];
+
+if (Number(loan.late_fee || 0) > 0) {
+  fineItems.push(
+    `ค่าปรับคืนล่าช้า: ${Number(loan.late_fee).toFixed(2)} บาท`
+  );
+}
+
+if (Number(loan.damage_fee || 0) > 0) {
+  fineItems.push(
+    `ค่าปรับหนังสือชำรุด: ${Number(loan.damage_fee).toFixed(2)} บาท`
+  );
+}
+
+if (Number(loan.lost_fee || 0) > 0) {
+  fineItems.push(
+    `ค่าปรับหนังสือสูญหาย: ${Number(loan.lost_fee).toFixed(2)} บาท`
+  );
+}
+
+const fineText = fineItems.length > 0
+  ? `💰 รายการค่าปรับ
+
+${fineItems.map((item, index) =>
+  `${index + 1}. ${item}`
+).join('\n')}
+
+รวมค่าปรับ: ${Number(loan.total_fine || 0).toFixed(2)} บาท
+
+หมายเหตุ: กรุณาชำระค่าปรับกับเจ้าหน้าที่ห้องสมุด`
+  : 'ไม่มีค่าปรับ';
+
+const text =
 `✅ คืนหนังสือเรียบร้อย
 
 หนังสือ: ${loan.title}
 รหัสเล่ม: ${loan.copy_code || '-'}
 วันที่คืน: ${thaiDate(loan.returned_at)}
-สภาพ: ${loan.return_condition || 'NORMAL'}
 
-ค่าปรับล่าช้า: ${Number(
-  loan.late_fee || 0
-).toFixed(2)} บาท
-ค่าปรับชำรุด: ${Number(
-  loan.damage_fee || 0
-).toFixed(2)} บาท
-ค่าปรับสูญหาย: ${Number(
-  loan.lost_fee || 0
-).toFixed(2)} บาท
-
-รวมค่าปรับ: ${Number(
-  loan.total_fine || 0
-).toFixed(2)} บาท`;
-
+${fineText}`;
   await pushLine(
     loan.line_user_id,
     text
@@ -531,7 +549,127 @@ export async function notifyFinePaid(
 
   return true;
 }
+/* =========================================================
+   FINE PAYMENT REJECTED
+   แจ้ง LINE เมื่อเจ้าหน้าที่ไม่อนุมัติสลิป
+========================================================= */
 
+export async function notifyFinePaymentRejected(loanId) {
+  const { rows } = await pool.query(
+    `
+      SELECT
+        l.id,
+        l.user_id,
+        l.payment_note,
+
+        l.late_fee,
+        l.damage_fee,
+        l.lost_fee,
+        l.total_fine,
+
+        b.title,
+
+        bc.copy_code,
+
+        lal.line_user_id
+
+      FROM loans l
+
+      JOIN books b
+        ON b.id = l.book_id
+
+      LEFT JOIN book_copies bc
+        ON bc.id = l.copy_id
+
+      JOIN line_account_links lal
+        ON lal.user_id = l.user_id
+
+      WHERE l.id = $1
+
+        AND l.payment_method = 'QR'
+
+        AND l.payment_status = 'UNPAID'
+
+      LIMIT 1
+    `,
+    [loanId]
+  );
+
+  const loan = rows[0];
+
+  if (!loan) {
+    return false;
+  }
+
+  // เหตุผลที่เจ้าหน้าที่กรอก
+  const reason =
+    loan.payment_note?.trim() ||
+    'สลิปไม่ถูกต้อง';
+
+  // แสดงเฉพาะค่าปรับที่มีจริง
+  const fineItems = [];
+
+  if (Number(loan.late_fee || 0) > 0) {
+    fineItems.push(
+      `ค่าปรับคืนล่าช้า: ${Number(
+        loan.late_fee
+      ).toFixed(2)} บาท`
+    );
+  }
+
+  if (Number(loan.damage_fee || 0) > 0) {
+    fineItems.push(
+      `ค่าปรับหนังสือชำรุด: ${Number(
+        loan.damage_fee
+      ).toFixed(2)} บาท`
+    );
+  }
+
+  if (Number(loan.lost_fee || 0) > 0) {
+    fineItems.push(
+      `ค่าปรับหนังสือสูญหาย: ${Number(
+        loan.lost_fee
+      ).toFixed(2)} บาท`
+    );
+  }
+
+  const fineText =
+    fineItems.length > 0
+      ? fineItems
+          .map(
+            (item, index) =>
+              `${index + 1}. ${item}`
+          )
+          .join('\n')
+      : 'ไม่มีรายการค่าปรับ';
+
+  const text =
+`❌ ไม่อนุมัติการชำระค่าปรับ
+
+หนังสือ: ${loan.title}
+รหัสเล่ม: ${loan.copy_code || '-'}
+
+💰 รายการค่าปรับ
+${fineText}
+
+ยอดค่าปรับรวม: ${Number(
+  loan.total_fine || 0
+).toFixed(2)} บาท
+
+สถานะ: ไม่อนุมัติการชำระเงิน
+
+📋 เหตุผลที่ไม่อนุมัติ:
+${reason}
+
+กรุณาตรวจสอบและส่งสลิปการชำระเงินใหม่ผ่านเว็บไซต์ห้องสมุด`;
+
+  await pushLine(
+    loan.line_user_id,
+    text
+  );
+
+  return true;
+}
 
 /* =========================================================
    RESERVATION EXPIRING
@@ -893,4 +1031,99 @@ export async function runLineNotifications() {
   );
 
   return result;
+}
+/* =========================================================
+   QR PAYMENT SUBMITTED
+   แจ้งเจ้าหน้าที่เมื่อสมาชิกส่งสลิป QR
+========================================================= */
+
+export async function notifyQrPaymentSubmitted(loanId) {
+  const { rows } = await pool.query(
+    `
+      SELECT
+        l.id,
+        l.total_fine,
+        l.payment_submitted_at,
+        b.title,
+        u.name AS member_name,
+        u.school_code
+      FROM loans l
+      JOIN books b
+        ON b.id = l.book_id
+      JOIN users u
+        ON u.id = l.user_id
+      WHERE l.id = $1
+        AND l.payment_method = 'QR'
+        AND l.payment_status = 'PENDING'
+      LIMIT 1
+    `,
+    [loanId]
+  );
+
+  const payment = rows[0];
+
+  if (!payment) {
+    return {
+      found: 0,
+      sent: 0,
+    };
+  }
+
+  const admins = await pool.query(
+    `
+      SELECT DISTINCT
+        u.id,
+        lal.line_user_id
+      FROM users u
+      JOIN line_account_links lal
+        ON lal.user_id = u.id
+      WHERE u.role = 'ADMIN'
+        AND u.active = true
+        AND lal.line_user_id IS NOT NULL
+    `
+  );
+
+  const text =
+`📩 มีรายการชำระค่าปรับรอตรวจสอบ
+
+สมาชิก: ${payment.member_name}
+รหัสสมาชิก: ${payment.school_code || '-'}
+หนังสือ: ${payment.title}
+รายการยืมเลขที่: ${payment.id}
+
+💰 ยอดชำระ: ${Number(
+  payment.total_fine || 0
+).toFixed(2)} บาท
+
+ช่องทาง: QR / โอนเงิน
+วันที่ส่งสลิป: ${thaiDate(
+  payment.payment_submitted_at
+)}
+
+สถานะ: รอตรวจสอบสลิป
+
+กรุณาเข้าสู่ระบบห้องสมุดเพื่อตรวจสอบและอนุมัติรายการ`;
+
+  let sent = 0;
+
+  for (const admin of admins.rows) {
+    try {
+      await pushLine(
+        admin.line_user_id,
+        text
+      );
+
+      sent++;
+    } catch (error) {
+      console.error(
+        `LINE QR notification failed for admin ${admin.id}:`,
+        error
+      );
+    }
+  }
+
+  return {
+    found: admins.rows.length,
+    sent,
+  };
 }

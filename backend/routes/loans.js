@@ -1,859 +1,730 @@
 import { Router } from 'express';
-
 import {
   pool,
   positiveId,
   httpError,
   availableSql,
 } from '../db.js';
-
-import {
-  authenticate,
-  allow,
-} from './auth.js';
-
+import { authenticate, allow } from './auth.js';
 import {
   notifyLoanCreated,
   notifyReturnCompleted,
   notifyFinePaid,
+  notifyFinePaymentRejected,
+  notifyQrPaymentSubmitted,
 } from '../jobs/lineNotifications.js';
 
 const router = Router();
-
 router.use(authenticate);
-
 
 /* =========================================================
    DASHBOARD
 ========================================================= */
 
-router.get(
-  '/dashboard',
-  allow('ADMIN'),
-  async (req, res) => {
-    const { rows } = await pool.query(`
-      SELECT
-        (
-          SELECT COUNT(*)::int
-          FROM book_copies
-          WHERE status IN ('AVAILABLE', 'BORROWED')
-        ) AS books,
+router.get('/dashboard', allow('ADMIN'), async (_req, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      (
+        SELECT COUNT(*)::int
+        FROM book_copies
+        WHERE status IN ('AVAILABLE', 'BORROWED')
+      ) AS books,
+      (
+        SELECT COUNT(*)::int
+        FROM users
+        WHERE role = 'MEMBER' AND active
+      ) AS members,
+      (
+        SELECT COUNT(*)::int
+        FROM reservations
+        WHERE status = 'PENDING'
+          AND expires_at > NOW()
+      ) AS pending,
+      (
+        SELECT COUNT(*)::int
+        FROM loans
+        WHERE returned_at IS NULL
+      ) AS borrowed,
+      (
+        SELECT COUNT(*)::int
+        FROM loans
+        WHERE returned_at IS NULL
+          AND COALESCE(renewed_until, due_at) < NOW()
+      ) AS overdue,
+      (
+        SELECT COUNT(*)::int
+        FROM loans
+        WHERE returned_at IS NOT NULL
+      ) AS returned,
+      (
+        SELECT COUNT(*)::int
+        FROM loans
+        WHERE total_fine > 0
+          AND payment_status = 'UNPAID'
+      ) AS unpaid_fines,
+      (
+        SELECT COUNT(*)::int
+        FROM loans
+        WHERE total_fine > 0
+          AND payment_status = 'PENDING'
+      ) AS pending_payments
+  `);
 
-        (
-          SELECT COUNT(*)::int
-          FROM users
-          WHERE role = 'MEMBER'
-            AND active
-        ) AS members,
-
-        (
-          SELECT COUNT(*)::int
-          FROM reservations
-          WHERE status = 'PENDING'
-            AND expires_at > NOW()
-        ) AS pending,
-
-        (
-          SELECT COUNT(*)::int
-          FROM loans
-          WHERE returned_at IS NULL
-        ) AS borrowed,
-
-        (
-          SELECT COUNT(*)::int
-          FROM loans
-          WHERE returned_at IS NULL
-            AND COALESCE(renewed_until, due_at) < NOW()
-        ) AS overdue,
-
-        (
-          SELECT COUNT(*)::int
-          FROM loans
-          WHERE returned_at IS NOT NULL
-        ) AS returned,
-
-        (
-          SELECT COUNT(*)::int
-          FROM loans
-          WHERE total_fine > 0
-            AND payment_status = 'UNPAID'
-        ) AS unpaid_fines,
-
-        (
-          SELECT COUNT(*)::int
-          FROM loans
-          WHERE total_fine > 0
-            AND payment_status = 'PENDING'
-        ) AS pending_payments
-    `);
-
-    res.json(rows[0]);
-  }
-);
-
+  res.json(rows[0]);
+});
 
 /* =========================================================
    REPORTS
 ========================================================= */
 
-router.get(
-  '/reports',
-  allow('ADMIN'),
-  async (req, res) => {
-    const monthly = await pool.query(`
-      SELECT
-        TO_CHAR(borrowed_at, 'YYYY-MM') AS month,
-        COUNT(*)::int AS loans,
-        COUNT(returned_at)::int AS returned
+router.get('/reports', allow('ADMIN'), async (_req, res) => {
+  const monthly = await pool.query(`
+    SELECT
+      TO_CHAR(borrowed_at, 'YYYY-MM') AS month,
+      COUNT(*)::int AS loans,
+      COUNT(returned_at)::int AS returned
+    FROM loans
+    GROUP BY 1
+    ORDER BY 1 DESC
+    LIMIT 12
+  `);
 
-      FROM loans
+  const popular = await pool.query(`
+    SELECT
+      b.title,
+      COUNT(l.id)::int AS loans
+    FROM books b
+    JOIN loans l ON l.book_id = b.id
+    GROUP BY b.id, b.title
+    ORDER BY loans DESC, b.title
+    LIMIT 10
+  `);
 
-      GROUP BY 1
-      ORDER BY 1 DESC
-
-      LIMIT 12
-    `);
-
-    const popular = await pool.query(`
-      SELECT
-        b.title,
-        COUNT(l.id)::int AS loans
-
-      FROM books b
-
-      JOIN loans l
-        ON l.book_id = b.id
-
-      GROUP BY
-        b.id,
-        b.title
-
-      ORDER BY
-        loans DESC,
-        b.title
-
-      LIMIT 10
-    `);
-
-    res.json({
-      monthly: monthly.rows,
-      popular: popular.rows,
-    });
-  }
-);
-
+  res.json({
+    monthly: monthly.rows,
+    popular: popular.rows,
+  });
+});
 
 /* =========================================================
    GET LOANS
-
-   MEMBER:
-   เห็นเฉพาะของตัวเอง
-
-   ADMIN:
-   เห็นทั้งหมด
-
-   เพิ่ม:
-   copy_id / copy_code / copy_status
 ========================================================= */
 
 router.get('/', async (req, res) => {
-  const { rows } = await pool.query(`
+  const { rows } = await pool.query(
+    `
     SELECT
       l.*,
-
       b.title,
       b.author,
       b.call_number,
       b.price,
-
       bc.copy_code,
       bc.status AS copy_status,
-
       u.name AS member_name,
       u.email,
       u.school_code,
       u.class_room,
       u.user_type,
-
-      COALESCE(
-        l.renewed_until,
-        l.due_at
-      ) AS effective_due_at,
-
+      COALESCE(l.renewed_until, l.due_at)
+        AS effective_due_at,
       CASE
-        WHEN l.returned_at IS NULL
-          THEN 'BORROWED'
+        WHEN l.returned_at IS NULL THEN 'BORROWED'
         ELSE 'RETURNED'
       END AS status,
-
       (
         l.returned_at IS NULL
-        AND COALESCE(
-          l.renewed_until,
-          l.due_at
-        ) < NOW()
+        AND COALESCE(l.renewed_until, l.due_at) < NOW()
       ) AS overdue,
-
       CASE
-        WHEN
-          l.returned_at IS NULL
-          AND COALESCE(
-            l.renewed_until,
-            l.due_at
-          ) < NOW()
-
+        WHEN l.returned_at IS NULL
+          AND COALESCE(l.renewed_until, l.due_at) < NOW()
         THEN CEIL(
           EXTRACT(
             EPOCH FROM (
-              NOW()
-              - COALESCE(
-                  l.renewed_until,
-                  l.due_at
-                )
+              NOW() - COALESCE(l.renewed_until, l.due_at)
             )
           ) / 86400
         )::int
-
         ELSE 0
       END AS overdue_days
-
     FROM loans l
-
-    JOIN books b
-      ON b.id = l.book_id
-
-    LEFT JOIN book_copies bc
-      ON bc.id = l.copy_id
-
-    JOIN users u
-      ON u.id = l.user_id
-
+    JOIN books b ON b.id = l.book_id
+    LEFT JOIN book_copies bc ON bc.id = l.copy_id
+    JOIN users u ON u.id = l.user_id
     WHERE
-      (
-        $1::int IS NULL
-        OR l.user_id = $1
-      )
-
+      ($1::int IS NULL OR l.user_id = $1)
       AND (
         $2::boolean = false
-
         OR (
           l.returned_at IS NULL
-          AND COALESCE(
-            l.renewed_until,
-            l.due_at
-          ) < NOW()
+          AND COALESCE(l.renewed_until, l.due_at) < NOW()
         )
       )
-
-    ORDER BY
-      l.borrowed_at DESC
-  `, [
-    req.user.role === 'MEMBER'
-      ? req.user.id
-      : null,
-
-    req.query.overdue === 'true',
-  ]);
+    ORDER BY l.borrowed_at DESC
+    `,
+    [
+      req.user.role === 'MEMBER' ? req.user.id : null,
+      req.query.overdue === 'true',
+    ]
+  );
 
   res.json(rows);
 });
 
+/* =========================================================
+   CREATE NORMAL LOAN
+========================================================= */
+
+router.post('/', allow('ADMIN'), async (req, res) => {
+  const reservationId = req.body.reservation_id
+    ? positiveId(req.body.reservation_id)
+    : null;
+
+  let bookId;
+  let userId;
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    if (reservationId) {
+      const result = await client.query(
+        `
+        SELECT id, book_id, user_id, status, expires_at
+        FROM reservations
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [reservationId]
+      );
+
+      const reservation = result.rows[0];
+
+      if (!reservation) {
+        throw httpError(404, 'ไม่พบการจอง');
+      }
+
+      if (reservation.status !== 'PENDING') {
+        throw httpError(
+          409,
+          'การจองนี้ถูกยกเลิก หมดอายุ หรือยืมแล้ว'
+        );
+      }
+
+      if (
+        new Date(reservation.expires_at).getTime() <= Date.now()
+      ) {
+        throw httpError(409, 'การจองหมดอายุแล้ว');
+      }
+
+      bookId = reservation.book_id;
+      userId = reservation.user_id;
+    } else {
+      bookId = positiveId(req.body.book_id);
+      userId = positiveId(req.body.user_id);
+    }
+
+    const book = await client.query(
+      'SELECT id, title FROM books WHERE id = $1 FOR UPDATE',
+      [bookId]
+    );
+
+    if (!book.rowCount) {
+      throw httpError(404, 'ไม่พบหนังสือ');
+    }
+
+    const member = await client.query(
+      `
+      SELECT id FROM users
+      WHERE id = $1 AND role = 'MEMBER' AND active
+      FOR SHARE
+      `,
+      [userId]
+    );
+
+    if (!member.rowCount) {
+      throw httpError(
+        400,
+        'ไม่พบผู้ใช้ห้องสมุดที่ใช้งานอยู่'
+      );
+    }
+
+    const duplicate = await client.query(
+      `
+      SELECT id FROM loans
+      WHERE user_id = $1
+        AND book_id = $2
+        AND returned_at IS NULL
+      LIMIT 1
+      `,
+      [userId, bookId]
+    );
+
+    if (duplicate.rowCount) {
+      throw httpError(
+        409,
+        'ผู้ยืมกำลังยืมหนังสือเรื่องนี้อยู่แล้ว'
+      );
+    }
+
+    if (!reservationId) {
+      const pending = await client.query(
+        `
+        SELECT id FROM reservations
+        WHERE user_id = $1
+          AND book_id = $2
+          AND status = 'PENDING'
+          AND expires_at > NOW()
+        LIMIT 1
+        `,
+        [userId, bookId]
+      );
+
+      if (pending.rowCount) {
+        throw httpError(
+          409,
+          'ผู้ยืมมีการจองอยู่ กรุณายืนยันจากหน้ารายการจอง'
+        );
+      }
+    }
+
+    if (reservationId) {
+      const reserved = await client.query(
+        `
+        UPDATE reservations
+        SET status = 'FULFILLED'
+        WHERE id = $1
+          AND status = 'PENDING'
+          AND expires_at > NOW()
+        RETURNING id
+        `,
+        [reservationId]
+      );
+
+      if (!reserved.rowCount) {
+        throw httpError(
+          409,
+          'การจองหมดอายุ ถูกยกเลิก หรือยืมแล้ว'
+        );
+      }
+    }
+
+    const stock = await client.query(
+      `
+      SELECT (${availableSql}) AS available
+      FROM books b
+      WHERE b.id = $1
+      `,
+      [bookId]
+    );
+
+    if (Number(stock.rows[0]?.available ?? 0) < 1) {
+      throw httpError(
+        409,
+        'ไม่มีหนังสือว่างสำหรับยืม'
+      );
+    }
+
+    const copyResult = await client.query(
+      `
+      SELECT id, copy_code
+      FROM book_copies
+      WHERE book_id = $1
+        AND status = 'AVAILABLE'
+      ORDER BY id
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+      `,
+      [bookId]
+    );
+
+    const copy = copyResult.rows[0];
+
+    if (!copy) {
+      throw httpError(
+        409,
+        'ไม่มีหนังสือจริงที่ว่างสำหรับยืม'
+      );
+    }
+
+    const created = await client.query(
+      `
+      INSERT INTO loans (
+        user_id,
+        book_id,
+        copy_id,
+        reservation_id,
+        borrowed_by,
+        due_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5,
+        NOW() + INTERVAL '14 days'
+      )
+      RETURNING *
+      `,
+      [
+        userId,
+        bookId,
+        copy.id,
+        reservationId,
+        req.user.id,
+      ]
+    );
+
+    const updatedCopy = await client.query(
+      `
+      UPDATE book_copies
+      SET status = 'BORROWED'
+      WHERE id = $1 AND status = 'AVAILABLE'
+      RETURNING id
+      `,
+      [copy.id]
+    );
+
+    if (!updatedCopy.rowCount) {
+      throw httpError(
+        409,
+        'สถานะหนังสือเปลี่ยนไปแล้ว'
+      );
+    }
+
+    await client.query('COMMIT');
+
+    try {
+      await notifyLoanCreated(created.rows[0].id);
+    } catch (error) {
+      console.error('LINE loan notification failed:', error);
+    }
+
+    res.status(201).json({
+      ...created.rows[0],
+      copy_code: copy.copy_code,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
 
 /* =========================================================
-   CREATE LOAN
-
-   ADMIN เท่านั้น
-
-   รองรับ:
-   - ยืมจาก reservation
-   - walk-in
-   - เลือก copy จริงที่ AVAILABLE
-   - 1 copy ยืมได้ครั้งละ 1 คน
-   - กำหนดคืน 14 วัน
+   NEW: MANUAL OVERDUE
+   เพิ่มรายการเกินกำหนดย้อนหลัง
 ========================================================= */
 
 router.post(
-  '/',
+  '/manual-overdue',
   allow('ADMIN'),
   async (req, res) => {
-    const reservationId =
-      req.body.reservation_id
-        ? positiveId(
-            req.body.reservation_id
-          )
-        : null;
+    const userId = positiveId(req.body.user_id);
+    const bookId = positiveId(req.body.book_id);
 
-    let bookId;
-    let userId;
+    const borrowedAt = req.body.borrowed_at;
+    const dueAt = req.body.due_at;
 
-    const client =
-      await pool.connect();
+    function validDate(value){
+      if (
+        typeof value !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(value)
+      ) {
+        return false;
+      }
+
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+
+      return (
+        !Number.isNaN(parsed.getTime()) &&
+        parsed.toISOString().slice(0, 10) === value
+      );
+    }
+
+    if (!validDate(borrowedAt) || !validDate(dueAt)) {
+      throw httpError(400, 'รูปแบบวันที่ไม่ถูกต้อง');
+    }
+
+    const todayBangkok = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+
+    if (borrowedAt > dueAt || dueAt >= todayBangkok) {
+      throw httpError(
+        400,
+        'วันที่ยืมต้องไม่หลังวันครบกำหนด และวันครบกำหนดต้องผ่านไปแล้ว'
+      );
+    }
+
+    const client = await pool.connect();
 
     try {
       await client.query('BEGIN');
 
+      const book = await client.query(
+        `
+        SELECT id
+        FROM books
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [bookId]
+      );
 
-      /* =====================================================
-         RESERVATION
-      ===================================================== */
-
-      if (reservationId) {
-        const { rows } =
-          await client.query(`
-            SELECT
-              id,
-              book_id,
-              user_id,
-              status,
-              expires_at
-
-            FROM reservations
-
-            WHERE id = $1
-
-            FOR UPDATE
-          `, [
-            reservationId,
-          ]);
-
-        const reservation =
-          rows[0];
-
-        if (!reservation) {
-          throw httpError(
-            404,
-            'ไม่พบการจอง'
-          );
-        }
-
-        if (
-          reservation.status !==
-          'PENDING'
-        ) {
-          throw httpError(
-            409,
-            'การจองนี้ถูกยกเลิก หมดอายุ หรือยืมแล้ว'
-          );
-        }
-
-        if (
-          new Date(
-            reservation.expires_at
-          ).getTime() <= Date.now()
-        ) {
-          throw httpError(
-            409,
-            'การจองหมดอายุแล้ว'
-          );
-        }
-
-        bookId =
-          reservation.book_id;
-
-        userId =
-          reservation.user_id;
-
-      } else {
-        bookId =
-          positiveId(
-            req.body.book_id
-          );
-
-        userId =
-          positiveId(
-            req.body.user_id
-          );
+      if (!book.rowCount) {
+        throw httpError(404, 'ไม่พบหนังสือ');
       }
 
+      const member = await client.query(
+        `
+        SELECT id
+        FROM users
+        WHERE id = $1
+          AND role = 'MEMBER'
+          AND active
+        FOR SHARE
+        `,
+        [userId]
+      );
 
-      /* =====================================================
-         CHECK BOOK TITLE
-      ===================================================== */
-
-      const book =
-        await client.query(`
-          SELECT
-            id,
-            title
-
-          FROM books
-
-          WHERE id = $1
-
-          FOR UPDATE
-        `, [
-          bookId,
-        ]);
-
-      if (!book.rows[0]) {
-        throw httpError(
-          404,
-          'ไม่พบหนังสือ'
-        );
-      }
-
-
-      /* =====================================================
-         CHECK MEMBER
-      ===================================================== */
-
-      const member =
-        await client.query(`
-          SELECT id
-
-          FROM users
-
-          WHERE
-            id = $1
-            AND role = 'MEMBER'
-            AND active
-
-          FOR SHARE
-        `, [
-          userId,
-        ]);
-
-      if (!member.rows[0]) {
+      if (!member.rowCount) {
         throw httpError(
           400,
-          'ไม่พบผู้ใช้ห้องสมุดที่ใช้งานอยู่'
+          'ไม่พบสมาชิกที่เปิดใช้งาน'
         );
       }
 
+      const duplicate = await client.query(
+        `
+        SELECT id
+        FROM loans
+        WHERE user_id = $1
+          AND book_id = $2
+          AND returned_at IS NULL
+        LIMIT 1
+        `,
+        [userId, bookId]
+      );
 
-      /* =====================================================
-         SAME TITLE ACTIVE LOAN
-
-         คนเดิมยังถือหนังสือเรื่องนี้อยู่
-         ห้ามยืมชื่อเรื่องเดียวกันเพิ่ม
-      ===================================================== */
-
-      const duplicateLoan =
-        await client.query(`
-          SELECT id
-
-          FROM loans
-
-          WHERE
-            user_id = $1
-            AND book_id = $2
-            AND returned_at IS NULL
-
-          LIMIT 1
-        `, [
-          userId,
-          bookId,
-        ]);
-
-      if (duplicateLoan.rowCount) {
+      if (duplicate.rowCount) {
         throw httpError(
           409,
-          'ผู้ยืมกำลังยืมหนังสือเรื่องนี้อยู่แล้ว'
+          'สมาชิกมีรายการยืมหนังสือเรื่องนี้ที่ยังไม่คืนแล้ว'
         );
       }
 
+      const stock = await client.query(
+        `
+        SELECT (${availableSql}) AS available
+        FROM books b
+        WHERE b.id = $1
+        `,
+        [bookId]
+      );
 
-      /* =====================================================
-         WALK-IN
-
-         ถ้าผู้ใช้คนนี้มี reservation
-         ต้องไปยืนยันจาก reservation
-      ===================================================== */
-
-      if (!reservationId) {
-        const pending =
-          await client.query(`
-            SELECT id
-
-            FROM reservations
-
-            WHERE
-              user_id = $1
-              AND book_id = $2
-              AND status = 'PENDING'
-              AND expires_at > NOW()
-
-            LIMIT 1
-          `, [
-            userId,
-            bookId,
-          ]);
-
-        if (pending.rowCount) {
-          throw httpError(
-            409,
-            'ผู้ยืมมีการจองอยู่ กรุณายืนยันจากหน้ารายการจอง'
-          );
-        }
-      }
-
-
-      /* =====================================================
-         FULFILL RESERVATION
-
-         ทำก่อนคำนวณ availableSql
-         เพื่อไม่ให้ reservation ตัวเอง
-         ถูกหัก stock ซ้ำ
-      ===================================================== */
-
-      if (reservationId) {
-        const reserved =
-          await client.query(`
-            UPDATE reservations
-
-            SET status = 'FULFILLED'
-
-            WHERE
-              id = $1
-              AND status = 'PENDING'
-              AND expires_at > NOW()
-
-            RETURNING id
-          `, [
-            reservationId,
-          ]);
-
-        if (!reserved.rowCount) {
-          throw httpError(
-            409,
-            'การจองหมดอายุ ถูกยกเลิก หรือยืมแล้ว'
-          );
-        }
-      }
-
-
-      /* =====================================================
-         CHECK LOGICAL STOCK
-
-         ป้องกัน walk-in ใช้ stock
-         ที่ถูก reservation คนอื่น hold ไว้
-      ===================================================== */
-
-      const stock =
-        await client.query(`
-          SELECT
-            (${availableSql})
-            AS available
-
-          FROM books b
-
-          WHERE b.id = $1
-        `, [
-          bookId,
-        ]);
-
-      if (
-        Number(
-          stock.rows[0]?.available
-          ?? 0
-        ) < 1
-      ) {
+      if (Number(stock.rows[0]?.available ?? 0) < 1) {
         throw httpError(
           409,
-          'ไม่มีหนังสือว่างสำหรับยืม'
+          'ไม่มีหนังสือว่าง หรือหนังสือถูกจองไว้'
         );
       }
 
+      const copyResult = await client.query(
+        `
+        SELECT id, copy_code
+        FROM book_copies
+        WHERE book_id = $1
+          AND status = 'AVAILABLE'
+        ORDER BY id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+        `,
+        [bookId]
+      );
 
-      /* =====================================================
-         SELECT PHYSICAL COPY
-
-         ตรงนี้คือส่วนสำคัญ:
-         หนังสือจริง 1 เล่ม = 1 copy_id
-
-         SKIP LOCKED ช่วยป้องกัน
-         request พร้อมกันเลือกเล่มเดียวกัน
-      ===================================================== */
-
-      const copyResult =
-        await client.query(`
-          SELECT
-            id,
-            copy_code
-
-          FROM book_copies
-
-          WHERE
-            book_id = $1
-            AND status = 'AVAILABLE'
-
-          ORDER BY id
-
-          FOR UPDATE SKIP LOCKED
-
-          LIMIT 1
-        `, [
-          bookId,
-        ]);
-
-      const copy =
-        copyResult.rows[0];
+      const copy = copyResult.rows[0];
 
       if (!copy) {
         throw httpError(
           409,
-          'ไม่มีหนังสือจริงที่ว่างสำหรับยืม'
+          'ไม่มีหนังสือจริงที่ว่างสำหรับบันทึก'
         );
       }
 
-
-      /* =====================================================
-         CREATE LOAN
-      ===================================================== */
-
-      const { rows } =
-        await client.query(`
-          INSERT INTO loans(
-            user_id,
-            book_id,
-            copy_id,
-            reservation_id,
-            borrowed_by,
-            due_at
-          )
-
-          VALUES(
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            NOW() + INTERVAL '14 days'
-          )
-
-          RETURNING *
-        `, [
+      const created = await client.query(
+        `
+        INSERT INTO loans (
+          user_id,
+          book_id,
+          copy_id,
+          reservation_id,
+          borrowed_by,
+          borrowed_at,
+          due_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          NULL,
+          $4,
+          ($5::date + TIME '12:00:00')
+            AT TIME ZONE 'Asia/Bangkok',
+          ($6::date + TIME '23:59:59')
+            AT TIME ZONE 'Asia/Bangkok'
+        )
+        RETURNING *
+        `,
+        [
           userId,
           bookId,
           copy.id,
-          reservationId,
           req.user.id,
-        ]);
-
-
-      /* =====================================================
-         COPY -> BORROWED
-      ===================================================== */
-
-      await client.query(`
-        UPDATE book_copies
-
-        SET status = 'BORROWED'
-
-        WHERE
-          id = $1
-          AND status = 'AVAILABLE'
-      `, [
-        copy.id,
-      ]);
-
-
-      await client.query(
-        'COMMIT'
+          borrowedAt,
+          dueAt,
+        ]
       );
 
-      /* LINE - แจ้งเตือนยืมหนังสือสำเร็จ */
-      try {
-        await notifyLoanCreated(
-          rows[0].id
-        );
-      } catch (error) {
-        console.error(
-          `LINE loan notification failed: loan ${rows[0].id}`,
-          error
+      const updatedCopy = await client.query(
+        `
+        UPDATE book_copies
+        SET status = 'BORROWED'
+        WHERE id = $1
+          AND status = 'AVAILABLE'
+        RETURNING id
+        `,
+        [copy.id]
+      );
+
+      if (!updatedCopy.rowCount) {
+        throw httpError(
+          409,
+          'สถานะหนังสือเปลี่ยนไปแล้ว กรุณาลองใหม่'
         );
       }
 
-      res
-        .status(201)
-        .json({
-          ...rows[0],
+      await client.query('COMMIT');
 
-          copy_code:
-            copy.copy_code,
-        });
-
+      res.status(201).json({
+        ...created.rows[0],
+        copy_code: copy.copy_code,
+      });
     } catch (error) {
-      await client.query(
-        'ROLLBACK'
-      );
-
+      await client.query('ROLLBACK');
       throw error;
-
     } finally {
       client.release();
     }
   }
 );
+
 /* =========================================================
    RENEW LOAN
-
-   - 1 ครั้ง
-   - ต้องถึงกำหนดเดิมก่อน
-   - +7 วัน
 ========================================================= */
 
-router.patch(
-  '/:id/renew',
-  async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+router.patch('/:id/renew', async (req, res) => {
+  const id = positiveId(req.params.id);
+  const client = await pool.connect();
 
-    const client =
-      await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-    try {
-      await client.query('BEGIN');
+    const { rows } = await client.query(
+      `
+      SELECT *
+      FROM loans
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [id]
+    );
 
-      const { rows } =
-        await client.query(`
-          SELECT *
+    const loan = rows[0];
 
-          FROM loans
-
-          WHERE id = $1
-
-          FOR UPDATE
-        `, [
-          id,
-        ]);
-
-      const loan =
-        rows[0];
-
-      if (!loan) {
-        throw httpError(
-          404,
-          'ไม่พบรายการยืม'
-        );
-      }
-
-      if (
-        req.user.role === 'MEMBER'
-        && loan.user_id !==
-          req.user.id
-      ) {
-        throw httpError(
-          403,
-          'ไม่มีสิทธิ์ต่ออายุรายการนี้'
-        );
-      }
-
-      if (loan.returned_at) {
-        throw httpError(
-          409,
-          'หนังสือถูกคืนแล้ว'
-        );
-      }
-
-      if (
-        loan.renewal_count >= 1
-      ) {
-        throw httpError(
-          409,
-          'รายการนี้ใช้สิทธิ์ต่ออายุแล้ว'
-        );
-      }
-
-      const dueAt =
-        new Date(
-          loan.due_at
-        );
-
-      if (
-        Date.now() <
-        dueAt.getTime()
-      ) {
-        throw httpError(
-          409,
-          'ยังไม่ถึงวันครบกำหนดคืน'
-        );
-      }
-
-      const updated =
-        await client.query(`
-          UPDATE loans
-
-          SET
-            renewal_count = 1,
-            renewed_at = NOW(),
-
-            renewed_until =
-              due_at
-              + INTERVAL '7 days'
-
-          WHERE id = $1
-
-          RETURNING *
-        `, [
-          id,
-        ]);
-
-      await client.query(
-        'COMMIT'
-      );
-
-      res.json(
-        updated.rows[0]
-      );
-
-    } catch (error) {
-      await client.query(
-        'ROLLBACK'
-      );
-
-      throw error;
-
-    } finally {
-      client.release();
+    if (!loan) {
+      throw httpError(404, 'ไม่พบรายการยืม');
     }
-  }
-);
 
+    if (
+      req.user.role === 'MEMBER' &&
+      loan.user_id !== req.user.id
+    ) {
+      throw httpError(
+        403,
+        'ไม่มีสิทธิ์ต่ออายุรายการนี้'
+      );
+    }
+
+    if (loan.returned_at) {
+      throw httpError(
+        409,
+        'หนังสือถูกคืนแล้ว'
+      );
+    }
+
+    if (loan.renewal_count >= 1) {
+      throw httpError(
+        409,
+        'รายการนี้ใช้สิทธิ์ต่ออายุแล้ว'
+      );
+    }
+
+    if (
+      Date.now() <
+      new Date(loan.due_at).getTime()
+    ) {
+      throw httpError(
+        409,
+        'ยังไม่ถึงวันครบกำหนดคืน'
+      );
+    }
+
+    const updated = await client.query(
+      `
+      UPDATE loans
+      SET
+        renewal_count = 1,
+        renewed_at = NOW(),
+        renewed_until = due_at + INTERVAL '7 days'
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json(updated.rows[0]);
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+
+  } finally {
+    client.release();
+  }
+});
 
 /* =========================================================
    RETURN BOOK
-
-   NORMAL
-   DAMAGED
-   LOST
-
-   NORMAL / DAMAGED:
-   copy -> AVAILABLE
-
-   LOST:
-   copy -> LOST
-
-   late fee:
-   1 บาท / วัน
 ========================================================= */
 
 router.patch(
   '/:id/return',
   allow('ADMIN'),
   async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+    const id = positiveId(req.params.id);
 
-    const returnCondition =
-      String(
-        req.body.return_condition
-          || 'NORMAL'
-      ).toUpperCase();
+    const returnCondition = String(
+      req.body.return_condition || 'NORMAL'
+    ).toUpperCase();
 
     if (
-      ![
-        'NORMAL',
-        'DAMAGED',
-        'LOST',
-      ].includes(
-        returnCondition
-      )
+      !['NORMAL', 'DAMAGED', 'LOST'].includes(returnCondition)
     ) {
       throw httpError(
         400,
@@ -863,21 +734,14 @@ router.patch(
 
     let requestedDamageFee = 0;
 
-    if (
-      returnCondition ===
-      'DAMAGED'
-    ) {
-      requestedDamageFee =
-        Number(
-          req.body.damage_fee
-          ?? 0
-        );
+    if (returnCondition === 'DAMAGED') {
+      requestedDamageFee = Number(
+        req.body.damage_fee ?? 0
+      );
 
       if (
-        !Number.isFinite(
-          requestedDamageFee
-        )
-        || requestedDamageFee < 0
+        !Number.isFinite(requestedDamageFee) ||
+        requestedDamageFee < 0
       ) {
         throw httpError(
           400,
@@ -886,46 +750,30 @@ router.patch(
       }
     }
 
-    const client =
-      await pool.connect();
+    const client = await pool.connect();
 
     try {
       await client.query('BEGIN');
 
+      const { rows } = await client.query(
+        `
+        SELECT
+          l.*,
+          b.price,
+          b.total_copies,
+          b.title,
+          bc.copy_code,
+          bc.status AS copy_status
+        FROM loans l
+        JOIN books b ON b.id = l.book_id
+        LEFT JOIN book_copies bc ON bc.id = l.copy_id
+        WHERE l.id = $1
+        FOR UPDATE OF l, b
+        `,
+        [id]
+      );
 
-      /* =====================================================
-         LOCK LOAN + BOOK
-      ===================================================== */
-
-      const { rows } =
-        await client.query(`
-          SELECT
-            l.*,
-
-            b.price,
-            b.total_copies,
-            b.title,
-
-            bc.copy_code,
-            bc.status AS copy_status
-
-          FROM loans l
-
-          JOIN books b
-            ON b.id = l.book_id
-
-          LEFT JOIN book_copies bc
-            ON bc.id = l.copy_id
-
-          WHERE l.id = $1
-
-          FOR UPDATE OF l, b
-        `, [
-          id,
-        ]);
-
-      const loan =
-        rows[0];
+      const loan = rows[0];
 
       if (!loan) {
         throw httpError(
@@ -941,26 +789,18 @@ router.patch(
         );
       }
 
-
-      /*
-        lock copy จริงแยกอีกครั้ง
-      */
-
       if (loan.copy_id) {
-        const lockedCopy =
-          await client.query(`
-            SELECT id
+        const lockedCopy = await client.query(
+          `
+          SELECT id
+          FROM book_copies
+          WHERE id = $1
+          FOR UPDATE
+          `,
+          [loan.copy_id]
+        );
 
-            FROM book_copies
-
-            WHERE id = $1
-
-            FOR UPDATE
-          `, [
-            loan.copy_id,
-          ]);
-
-        if (!lockedCopy.rows[0]) {
+        if (!lockedCopy.rowCount) {
           throw httpError(
             409,
             'ไม่พบข้อมูลหนังสือจริงของรายการยืมนี้'
@@ -968,22 +808,11 @@ router.patch(
         }
       }
 
-      const bookPrice =
-        Number(
-          loan.price || 0
-        );
-
-
-      /* =====================================================
-         DAMAGE FEE
-      ===================================================== */
+      const bookPrice = Number(loan.price || 0);
 
       if (
-        returnCondition ===
-          'DAMAGED'
-        &&
-        requestedDamageFee >
-          bookPrice
+        returnCondition === 'DAMAGED' &&
+        requestedDamageFee > bookPrice
       ) {
         throw httpError(
           400,
@@ -991,299 +820,175 @@ router.patch(
         );
       }
 
+      const effectiveDueAt = new Date(
+        loan.renewed_until || loan.due_at
+      );
 
-      /* =====================================================
-         EFFECTIVE DUE DATE
-      ===================================================== */
+      const today = new Date();
 
-      const effectiveDueAt =
-        loan.renewed_until
-          ? new Date(
-              loan.renewed_until
-            )
-          : new Date(
-              loan.due_at
-            );
+      const dueDate = new Date(
+        effectiveDueAt.getFullYear(),
+        effectiveDueAt.getMonth(),
+        effectiveDueAt.getDate()
+      );
 
+      const returnDate = new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        today.getDate()
+      );
 
-      /*
-        คิดเป็นวันปฏิทิน
-      */
+      const lateDays = Math.max(
+        0,
+        Math.round(
+          (returnDate.getTime() - dueDate.getTime()) /
+            (1000 * 60 * 60 * 24)
+        )
+      );
 
-      const today =
-        new Date();
-
-      const dueDate =
-        new Date(
-          effectiveDueAt.getFullYear(),
-          effectiveDueAt.getMonth(),
-          effectiveDueAt.getDate()
-        );
-
-      const returnDate =
-        new Date(
-          today.getFullYear(),
-          today.getMonth(),
-          today.getDate()
-        );
-
-      const lateDays =
-        Math.max(
-          0,
-
-          Math.round(
-            (
-              returnDate.getTime()
-              - dueDate.getTime()
-            )
-            /
-            (
-              1000
-              * 60
-              * 60
-              * 24
-            )
-          )
-        );
-
-
-      /* 1 บาท / วัน */
-
-      const lateFee =
-        lateDays;
-
-
-      /* =====================================================
-         DAMAGE / LOST
-      ===================================================== */
+      const lateFee = lateDays;
 
       const damageFee =
-        returnCondition ===
-        'DAMAGED'
+        returnCondition === 'DAMAGED'
           ? requestedDamageFee
           : 0;
 
       const lostFee =
-        returnCondition ===
-        'LOST'
+        returnCondition === 'LOST'
           ? bookPrice
           : 0;
 
       const totalFine =
-        lateFee
-        + damageFee
-        + lostFee;
+        lateFee + damageFee + lostFee;
 
       const paymentStatus =
-        totalFine > 0
-          ? 'UNPAID'
-          : 'PAID';
+        totalFine > 0 ? 'UNPAID' : 'PAID';
 
-
-      /* =====================================================
-         UPDATE LOAN
-      ===================================================== */
-
-      const returned =
-        await client.query(`
-          UPDATE loans
-
-          SET
-            returned_at = NOW(),
-            returned_by = $1,
-
-            return_condition = $2,
-
-            late_fee = $3,
-            damage_fee = $4,
-            lost_fee = $5,
-
-            total_fine = $6,
-
-            payment_status = $7,
-
-            payment_method = NULL,
-            payment_slip_url = NULL,
-            payment_submitted_at = NULL,
-
-            fine_paid_at = NULL,
-            fine_received_by = NULL,
-
-            payment_note = NULL
-
-          WHERE id = $8
-
-          RETURNING *
-        `, [
+      const returned = await client.query(
+        `
+        UPDATE loans
+        SET
+          returned_at = NOW(),
+          returned_by = $1,
+          return_condition = $2,
+          late_fee = $3,
+          damage_fee = $4,
+          lost_fee = $5,
+          total_fine = $6,
+          payment_status = $7,
+          payment_method = NULL,
+          payment_slip_url = NULL,
+          payment_submitted_at = NULL,
+          fine_paid_at = NULL,
+          fine_received_by = NULL,
+          payment_note = NULL
+        WHERE id = $8
+        RETURNING *
+        `,
+        [
           req.user.id,
           returnCondition,
-
           lateFee,
           damageFee,
           lostFee,
-
           totalFine,
           paymentStatus,
-
           id,
-        ]);
-
-
-      /* =====================================================
-         UPDATE PHYSICAL COPY
-      ===================================================== */
+        ]
+      );
 
       if (loan.copy_id) {
-        if (
-          returnCondition ===
-          'LOST'
-        ) {
-          await client.query(`
+        if (returnCondition === 'LOST') {
+          await client.query(
+            `
             UPDATE book_copies
-
             SET status = 'LOST'
-
             WHERE id = $1
-          `, [
-            loan.copy_id,
-          ]);
-
+            `,
+            [loan.copy_id]
+          );
         } else {
-          /*
-            NORMAL / DAMAGED
-
-            ตอนนี้ DAMAGED ถือว่ารับคืนแล้ว
-            และยังอยู่ในระบบ
-
-            ถ้าภายหลังต้องการสถานะ
-            REPAIR สามารถเพิ่มได้
-          */
-
-          await client.query(`
+          await client.query(
+            `
             UPDATE book_copies
-
             SET status = 'AVAILABLE'
-
             WHERE id = $1
-          `, [
-            loan.copy_id,
-          ]);
+            `,
+            [loan.copy_id]
+          );
         }
       }
 
-
-      /* =====================================================
-         SYNC total_copies
-
-         AVAILABLE + BORROWED เท่านั้น
-
-         LOST / RETIRED
-         ไม่นับเป็นหนังสือที่ใช้งานได้
-      ===================================================== */
-
-      await client.query(`
+      await client.query(
+        `
         UPDATE books b
-
         SET total_copies = (
           SELECT COUNT(*)::int
-
           FROM book_copies bc
-
-          WHERE
-            bc.book_id = b.id
-
-            AND bc.status IN (
-              'AVAILABLE',
-              'BORROWED'
-            )
+          WHERE bc.book_id = b.id
+            AND bc.status IN ('AVAILABLE', 'BORROWED')
         )
-
         WHERE b.id = $1
-      `, [
-        loan.book_id,
-      ]);
-
-
-      await client.query(
-        'COMMIT'
+        `,
+        [loan.book_id]
       );
 
-      /* LINE - แจ้งเตือนคืนหนังสือสำเร็จ */
+      await client.query('COMMIT');
+
       try {
         await notifyReturnCompleted(id);
       } catch (error) {
         console.error(
-          `LINE return notification failed: loan ${id}`,
+          'LINE return notification failed:',
           error
         );
       }
 
       res.json({
         ...returned.rows[0],
-
-        copy_code:
-          loan.copy_code,
-
-        late_days:
-          lateDays,
-
+        copy_code: loan.copy_code,
+        late_days: lateDays,
         message:
           totalFine > 0
             ? `คืนหนังสือแล้ว มีค่าปรับรวม ${totalFine.toFixed(2)} บาท`
             : 'คืนหนังสือเรียบร้อย ไม่มีค่าปรับ',
       });
-
     } catch (error) {
-      await client.query(
-        'ROLLBACK'
-      );
-
+      await client.query('ROLLBACK');
       throw error;
-
     } finally {
       client.release();
     }
   }
 );
+
 /* =========================================================
-   PAY FINE - CASH
+   CASH PAYMENT
 ========================================================= */
 
 router.patch(
   '/:id/payment/cash',
   allow('ADMIN'),
   async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+    const id = positiveId(req.params.id);
 
-    const { rows } =
-      await pool.query(`
-        UPDATE loans
-
-        SET
-          payment_method = 'CASH',
-          payment_status = 'PAID',
-
-          fine_paid_at = NOW(),
-          fine_received_by = $1,
-
-          payment_note = NULL
-
-        WHERE id = $2
-
-          AND returned_at IS NOT NULL
-
-          AND total_fine > 0
-
-          AND payment_status <> 'PAID'
-
-        RETURNING *
-      `, [
-        req.user.id,
-        id,
-      ]);
+    const { rows } = await pool.query(
+      `
+      UPDATE loans
+      SET
+        payment_method = 'CASH',
+        payment_status = 'PAID',
+        fine_paid_at = NOW(),
+        fine_received_by = $1,
+        payment_note = NULL
+      WHERE id = $2
+        AND returned_at IS NOT NULL
+        AND total_fine > 0
+        AND payment_status <> 'PAID'
+      RETURNING *
+      `,
+      [req.user.id, id]
+    );
 
     if (!rows[0]) {
       throw httpError(
@@ -1292,12 +997,11 @@ router.patch(
       );
     }
 
-    /* LINE - แจ้งเตือนชำระค่าปรับเงินสดสำเร็จ */
     try {
       await notifyFinePaid(id);
     } catch (error) {
       console.error(
-        `LINE cash payment notification failed: loan ${id}`,
+        'LINE cash payment notification failed:',
         error
       );
     }
@@ -1306,28 +1010,18 @@ router.patch(
   }
 );
 
-
 /* =========================================================
-   QR - MEMBER SUBMIT SLIP
+   QR: MEMBER SUBMIT SLIP
 ========================================================= */
 
 router.patch(
   '/:id/payment/qr-submit',
   async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+    const id = positiveId(req.params.id);
 
     const slipUrl =
-      typeof req.body
-        .payment_slip_url ===
-        'string'
-
-        ? req.body
-            .payment_slip_url
-            .trim()
-
+      typeof req.body.payment_slip_url === 'string'
+        ? req.body.payment_slip_url.trim()
         : '';
 
     if (!slipUrl) {
@@ -1337,43 +1031,32 @@ router.patch(
       );
     }
 
-    const client =
-      await pool.connect();
+    const client = await pool.connect();
+
+    let committed = false;
 
     try {
-      await client.query(
-        'BEGIN'
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        `
+        SELECT *
+        FROM loans
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [id]
       );
 
-      const { rows } =
-        await client.query(`
-          SELECT *
-
-          FROM loans
-
-          WHERE id = $1
-
-          FOR UPDATE
-        `, [
-          id,
-        ]);
-
-      const loan =
-        rows[0];
+      const loan = rows[0];
 
       if (!loan) {
-        throw httpError(
-          404,
-          'ไม่พบรายการ'
-        );
+        throw httpError(404, 'ไม่พบรายการ');
       }
 
       if (
-        req.user.role ===
-          'MEMBER'
-        &&
-        loan.user_id !==
-          req.user.id
+        req.user.role === 'MEMBER' &&
+        loan.user_id !== req.user.id
       ) {
         throw httpError(
           403,
@@ -1388,60 +1071,68 @@ router.patch(
         );
       }
 
-      if (
-        Number(
-          loan.total_fine
-        ) <= 0
-      ) {
+      if (Number(loan.total_fine) <= 0) {
         throw httpError(
           409,
           'รายการนี้ไม่มีค่าปรับ'
         );
       }
 
-      if (
-        loan.payment_status ===
-        'PAID'
-      ) {
+      if (loan.payment_status === 'PAID') {
         throw httpError(
           409,
           'ค่าปรับรายการนี้ชำระแล้ว'
         );
       }
 
-      const updated =
-        await client.query(`
-          UPDATE loans
+      if (loan.payment_status === 'PENDING') {
+        throw httpError(
+          409,
+          'มีสลิปรอตรวจสอบอยู่แล้ว กรุณารอเจ้าหน้าที่ตรวจสอบ'
+        );
+      }
 
-          SET
-            payment_method = 'QR',
-            payment_status = 'PENDING',
-
-            payment_slip_url = $1,
-            payment_submitted_at = NOW(),
-
-            payment_note = NULL
-
-          WHERE id = $2
-
-          RETURNING *
-        `, [
-          slipUrl,
-          id,
-        ]);
-
-      await client.query(
-        'COMMIT'
+      const updated = await client.query(
+        `
+        UPDATE loans
+        SET
+          payment_method = 'QR',
+          payment_status = 'PENDING',
+          payment_slip_url = $1,
+          payment_submitted_at = NOW(),
+          payment_note = NULL
+        WHERE id = $2
+        RETURNING *
+        `,
+        [slipUrl, id]
       );
 
-      res.json(
-        updated.rows[0]
-      );
+      await client.query('COMMIT');
+      committed = true;
+
+      res.json(updated.rows[0]);
+
+      notifyQrPaymentSubmitted(id)
+        .then((result) => {
+          console.log(
+            '[LINE QR PAYMENT SUBMITTED]',
+            {
+              loanId: id,
+              ...result,
+            }
+          );
+        })
+        .catch((error) => {
+          console.error(
+            '[LINE QR PAYMENT SUBMITTED] Failed:',
+            error
+          );
+        });
 
     } catch (error) {
-      await client.query(
-        'ROLLBACK'
-      );
+      if (!committed) {
+        await client.query('ROLLBACK');
+      }
 
       throw error;
 
@@ -1451,7 +1142,6 @@ router.patch(
   }
 );
 
-
 /* =========================================================
    ADMIN APPROVE QR PAYMENT
 ========================================================= */
@@ -1460,38 +1150,25 @@ router.patch(
   '/:id/payment/approve',
   allow('ADMIN'),
   async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+    const id = positiveId(req.params.id);
 
-    const { rows } =
-      await pool.query(`
-        UPDATE loans
-
-        SET
-          payment_status = 'PAID',
-
-          fine_paid_at = NOW(),
-          fine_received_by = $1,
-
-          payment_note = NULL
-
-        WHERE id = $2
-
-          AND payment_method = 'QR'
-
-          AND payment_status = 'PENDING'
-
-          AND payment_slip_url IS NOT NULL
-
-          AND total_fine > 0
-
-        RETURNING *
-      `, [
-        req.user.id,
-        id,
-      ]);
+    const { rows } = await pool.query(
+      `
+      UPDATE loans
+      SET
+        payment_status = 'PAID',
+        fine_paid_at = NOW(),
+        fine_received_by = $1,
+        payment_note = NULL
+      WHERE id = $2
+        AND payment_method = 'QR'
+        AND payment_status = 'PENDING'
+        AND payment_slip_url IS NOT NULL
+        AND total_fine > 0
+      RETURNING *
+      `,
+      [req.user.id, id]
+    );
 
     if (!rows[0]) {
       throw httpError(
@@ -1500,12 +1177,11 @@ router.patch(
       );
     }
 
-    /* LINE - แจ้งเตือนชำระค่าปรับ QR สำเร็จ */
     try {
       await notifyFinePaid(id);
     } catch (error) {
       console.error(
-        `LINE QR payment notification failed: loan ${id}`,
+        'LINE QR payment notification failed:',
         error
       );
     }
@@ -1513,6 +1189,7 @@ router.patch(
     res.json(rows[0]);
   }
 );
+
 /* =========================================================
    ADMIN REJECT QR SLIP
 ========================================================= */
@@ -1521,44 +1198,28 @@ router.patch(
   '/:id/payment/reject',
   allow('ADMIN'),
   async (req, res) => {
-    const id =
-      positiveId(
-        req.params.id
-      );
+    const id = positiveId(req.params.id);
 
     const note =
-      typeof req.body.note ===
-        'string'
-
+      typeof req.body.note === 'string'
         ? req.body.note.trim()
-
         : 'สลิปไม่ถูกต้อง';
 
-    const { rows } =
-      await pool.query(`
-        UPDATE loans
-
-        SET
-          payment_status = 'UNPAID',
-
-          fine_paid_at = NULL,
-          fine_received_by = NULL,
-
-          payment_note = $1
-
-        WHERE id = $2
-
-          AND payment_method = 'QR'
-
-          AND payment_status = 'PENDING'
-
-        RETURNING *
-      `, [
-        note ||
-          'สลิปไม่ถูกต้อง',
-
-        id,
-      ]);
+    const { rows } = await pool.query(
+      `
+      UPDATE loans
+      SET
+        payment_status = 'UNPAID',
+        fine_paid_at = NULL,
+        fine_received_by = NULL,
+        payment_note = $1
+      WHERE id = $2
+        AND payment_method = 'QR'
+        AND payment_status = 'PENDING'
+      RETURNING *
+      `,
+      [note || 'สลิปไม่ถูกต้อง', id]
+    );
 
     if (!rows[0]) {
       throw httpError(
@@ -1568,8 +1229,21 @@ router.patch(
     }
 
     res.json(rows[0]);
+
+    notifyFinePaymentRejected(id)
+      .then((sent) => {
+        console.log(
+          '[LINE PAYMENT REJECTED]',
+          { loanId: id, sent }
+        );
+      })
+      .catch((error) => {
+        console.error(
+          '[LINE PAYMENT REJECTED] Failed:',
+          error
+        );
+      });
   }
 );
-
 
 export default router;

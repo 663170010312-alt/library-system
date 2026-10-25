@@ -4,8 +4,6 @@ import { useState } from 'react';
 import { api, User } from '@/lib/api';
 import { useApp } from '@/components/AppShell';
 
-type UserType = 'STUDENT' | 'TEACHER';
-
 export default function ProfilePage() {
   const {
     user,
@@ -18,13 +16,6 @@ export default function ProfilePage() {
 
   const [busy, setBusy] =
     useState(false);
-
-  const [userType, setUserType] =
-    useState<UserType>(
-      user?.user_type === 'TEACHER'
-        ? 'TEACHER'
-        : 'STUDENT'
-    );
 
   if (!user) return null;
 
@@ -43,22 +34,10 @@ export default function ProfilePage() {
     currentUser.user_type === 'TEACHER';
 
   function startEditing() {
-    setUserType(
-      currentUser.user_type === 'TEACHER'
-        ? 'TEACHER'
-        : 'STUDENT'
-    );
-
     setEditing(true);
   }
 
   function cancelEditing() {
-    setUserType(
-      currentUser.user_type === 'TEACHER'
-        ? 'TEACHER'
-        : 'STUDENT'
-    );
-
     setEditing(false);
   }
 
@@ -299,42 +278,25 @@ export default function ProfilePage() {
               new FormData(form)
             );
 
-          const body: Record<
-            string,
-            FormDataEntryValue | string
-          > = {
-            ...raw,
-          };
+           // ส่งข้อมูลประจำตัวเดิมเสมอ เพื่อไม่ให้หน้าโปรไฟล์เปลี่ยนได้
+           const body: Record<string, FormDataEntryValue | string> = {
+             ...raw,
+             email: currentUser.email,
+           };
 
-          if (!isAdmin) {
-            body.user_type =
-              userType;
+           if (!isAdmin) {
+             body.user_type = currentUser.user_type || 'STUDENT';
+             body.school_code =
+               currentUser.school_code || currentUser.student_code || '';
 
-            body.school_code =
-              raw.school_code || '';
-
-            if (
-              userType ===
-              'STUDENT'
-            ) {
-              body.staff_position =
-                '';
-
-              body.department =
-                '';
-            }
-
-            if (
-              userType ===
-              'TEACHER'
-            ) {
-              body.class_level =
-                '';
-
-              body.room =
-                '';
-            }
-          }
+             if (currentUser.user_type === 'STUDENT') {
+               body.staff_position = '';
+               body.department = '';
+             } else if (currentUser.user_type === 'TEACHER') {
+               body.class_level = '';
+               body.room = '';
+             }
+           }
 
           const updated =
             await api<User>(
@@ -395,6 +357,9 @@ export default function ProfilePage() {
           <input
             name="email"
             type="email"
+            readOnly
+            aria-readonly="true"
+            className="bg-gray-100 cursor-not-allowed"
             required
             defaultValue={
               currentUser.email
@@ -419,29 +384,16 @@ export default function ProfilePage() {
             <label>
               ประเภทผู้ใช้
 
-              <select
-                name="user_type"
-                value={userType}
-                onChange={(e) =>
-                  setUserType(
-                    e.target
-                      .value as UserType
-                  )
-                }
-                required
-              >
-                <option value="STUDENT">
-                  นักเรียน
-                </option>
-
-                <option value="TEACHER">
-                  ครู / บุคลากร
-                </option>
-              </select>
+              <input
+                value={currentUser.user_type === 'TEACHER' ? 'ครู / บุคลากร' : 'นักเรียน'}
+                readOnly
+                aria-readonly="true"
+                className="bg-gray-100 cursor-not-allowed"
+              />
             </label>
 
             <label>
-              {userType ===
+              {currentUser.user_type ===
               'STUDENT'
                 ? 'รหัสนักเรียน'
                 : 'รหัสบุคลากร'}
@@ -449,7 +401,9 @@ export default function ProfilePage() {
               <input
                 name="school_code"
                 maxLength={50}
-                required
+                readOnly
+                aria-readonly="true"
+                className="bg-gray-100 cursor-not-allowed"
                 defaultValue={
                   currentUser.school_code ||
                   currentUser.student_code ||
@@ -458,7 +412,7 @@ export default function ProfilePage() {
               />
             </label>
 
-            {userType ===
+            {currentUser.user_type ===
               'STUDENT' && (
               <>
                 <label>
@@ -493,7 +447,7 @@ export default function ProfilePage() {
               </>
             )}
 
-            {userType ===
+            {currentUser.user_type ===
               'TEACHER' && (
               <>
                 <label>

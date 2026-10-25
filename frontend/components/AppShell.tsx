@@ -1,3 +1,4 @@
+
 'use client';
 
 import {
@@ -19,7 +20,6 @@ import {
   User,
 } from '@/lib/api';
 
-
 type Session = {
   user: User | null;
 
@@ -37,12 +37,10 @@ type Session = {
   ) => void;
 };
 
-
 const AppContext =
   createContext<Session | null>(
     null
   );
-
 
 export function useApp() {
   const session =
@@ -59,7 +57,6 @@ export function useApp() {
   return session;
 }
 
-
 const labels: Record<
   string,
   string
@@ -68,7 +65,7 @@ const labels: Record<
     'ค้นหาหนังสือ',
 
   dashboard:
-    'Dashboard / ยืมที่เคาน์เตอร์',
+    'ยืมที่เคาน์เตอร์',
 
   reservations:
     'รายการจอง',
@@ -95,7 +92,7 @@ const labels: Record<
     'บัญชีเจ้าหน้าที่',
 
   reports:
-    'รายงาน',
+    'Dashboard',
 
   profile:
     'โปรไฟล์',
@@ -103,7 +100,6 @@ const labels: Record<
   login:
     'เข้าสู่ระบบ',
 };
-
 
 export default function AppShell({
   children,
@@ -116,7 +112,6 @@ export default function AppShell({
   const pathname =
     usePathname();
 
-
   const [
     user,
     setUser,
@@ -125,13 +120,11 @@ export default function AppShell({
       null
     );
 
-
   const [
     ready,
     setReady,
   ] =
     useState(false);
-
 
   const [
     notice,
@@ -144,11 +137,9 @@ export default function AppShell({
       null
     );
 
-
   const staff =
     !!user &&
     user.role !== 'MEMBER';
-
 
   const links: Record<
     string,
@@ -196,7 +187,6 @@ export default function AppShell({
       '/login',
   };
 
-
   const page =
     Object
       .keys(links)
@@ -207,7 +197,6 @@ export default function AppShell({
       )
     || 'catalog';
 
-
   /*
     หน้าที่เปิดได้โดยไม่ Login
   */
@@ -215,16 +204,13 @@ export default function AppShell({
   const isLoginPage =
     pathname === '/login';
 
-
   const isLineLinkPage =
     pathname ===
     '/line-link';
 
-
   const publicPage =
     isLoginPage ||
     isLineLinkPage;
-
 
   const staffPage = [
     '/dashboard',
@@ -236,7 +222,6 @@ export default function AppShell({
     pathname
   );
 
-
   const adminPage = [
     '/categories',
     '/staff',
@@ -244,7 +229,6 @@ export default function AppShell({
   ].includes(
     pathname
   );
-
 
   const allowed =
     publicPage ||
@@ -263,7 +247,6 @@ export default function AppShell({
       )
     );
 
-
   /* =========================
      LOAD SESSION
   ========================= */
@@ -276,7 +259,6 @@ export default function AppShell({
             'library-token'
           );
 
-
       if (!token) {
         setReady(
           true
@@ -284,7 +266,6 @@ export default function AppShell({
 
         return;
       }
-
 
       api<User>(
         '/auth/me'
@@ -315,7 +296,6 @@ export default function AppShell({
     []
   );
 
-
   /* =========================
      CLEAR NOTICE
   ========================= */
@@ -331,74 +311,74 @@ export default function AppShell({
     ]
   );
 
-
   /* =========================
      PAGE GUARD
   ========================= */
 
   useEffect(
-  () => {
-    if (!ready) {
-      return;
-    }
+    () => {
+      if (!ready) {
+        return;
+      }
 
-    /*
-      หน้าปกติที่ต้อง Login
-    */
-    if (
-      !publicPage &&
-      !user
-    ) {
-      router.replace(
-        '/login'
-      );
-
-      return;
-    }
-
-    /*
-      Login สำเร็จจากการเชื่อม LINE
-      ต้องกลับ /line-link ก่อน
-    */
-    if (
-      isLoginPage &&
-      user
-    ) {
-      const lineLinkToken =
-        sessionStorage.getItem(
-          'line-link-token'
-        );
-
-      if (lineLinkToken) {
+      /*
+        หน้าปกติที่ต้อง Login
+      */
+      if (
+        !publicPage &&
+        !user
+      ) {
         router.replace(
-          `/line-link?token=${encodeURIComponent(
-            lineLinkToken
-          )}`
+          '/login'
         );
 
         return;
       }
 
       /*
-        Login ปกติ
+        Login สำเร็จจากการเชื่อม LINE
+        ต้องกลับ /line-link ก่อน
       */
-      router.replace(
-        user.role === 'MEMBER'
-          ? '/books'
-          : '/dashboard'
-      );
-    }
-  },
-  [
-    pathname,
-    ready,
-    publicPage,
-    isLoginPage,
-    user,
-    router,
-  ]
-);
+      if (
+        isLoginPage &&
+        user
+      ) {
+        const lineLinkToken =
+          sessionStorage.getItem(
+            'line-link-token'
+          );
 
+        if (lineLinkToken) {
+          router.replace(
+            `/line-link?token=${encodeURIComponent(
+              lineLinkToken
+            )}`
+          );
+
+          return;
+        }
+
+        /*
+          Login ปกติ
+        */
+        router.replace(
+          user.role === 'ADMIN'
+            ? '/reports'
+            : user.role === 'MEMBER'
+              ? '/books'
+              : '/dashboard'
+        );
+      }
+    },
+    [
+      pathname,
+      ready,
+      publicPage,
+      isLoginPage,
+      user,
+      router,
+    ]
+  );
 
   /* =========================
      NOTICE
@@ -413,7 +393,6 @@ export default function AppShell({
       error,
     });
   }
-
 
   /* =========================
      LOGIN
@@ -430,7 +409,6 @@ export default function AppShell({
       null
     );
 
-
     /*
       ถ้ามาจาก LINE
       จะมี token เก็บไว้ใน sessionStorage
@@ -446,7 +424,6 @@ export default function AppShell({
           'line-link-token'
         );
 
-
     if (
       lineLinkToken
     ) {
@@ -459,24 +436,36 @@ export default function AppShell({
       return;
     }
 
-
     /*
       Login ปกติ
     */
 
     router.push(
-      u.role === 'MEMBER'
-        ? '/books'
-        : '/dashboard'
+      u.role === 'ADMIN'
+        ? '/reports'
+        : u.role === 'MEMBER'
+          ? '/books'
+          : '/dashboard'
     );
   }
-
 
   /* =========================
      MENU
   ========================= */
 
   const menu = [
+    /*
+      Dashboard อยู่บนสุด
+      สำหรับผู้ดูแลระบบ
+    */
+    ...(
+      user?.role === 'ADMIN'
+        ? [
+            'reports',
+          ]
+        : []
+    ),
+
     'catalog',
 
     ...(
@@ -508,12 +497,10 @@ export default function AppShell({
     ),
 
     ...(
-      user?.role ===
-        'ADMIN'
+      user?.role === 'ADMIN'
         ? [
             'categories',
             'staff',
-            'reports',
           ]
         : []
     ),
@@ -529,7 +516,6 @@ export default function AppShell({
     ),
   ];
 
-
   /* =========================
      LOADING
   ========================= */
@@ -541,7 +527,6 @@ export default function AppShell({
       </p>
     );
   }
-
 
   /* =========================
      LOGIN / LINE LINK
@@ -567,7 +552,6 @@ export default function AppShell({
         isLoginPage &&
         !user
       );
-
 
     return (
       <AppContext.Provider
@@ -601,7 +585,6 @@ export default function AppShell({
 
           </div>
 
-
           {showChildren
             ? children
             : (
@@ -615,7 +598,6 @@ export default function AppShell({
       </AppContext.Provider>
     );
   }
-
 
   /* =========================
      MAIN APP
@@ -656,14 +638,12 @@ export default function AppShell({
 
           </div>
 
-
           <p className="muted text-xs px-4 mb-3">
             {staff
               ? 'พื้นที่เจ้าหน้าที่'
               : 'พื้นที่การอ่านของคุณ'
             }
           </p>
-
 
           <nav
             aria-label="เมนูหลัก"
@@ -706,7 +686,6 @@ export default function AppShell({
 
           </nav>
 
-
           <div className="hidden lg:block mt-8 p-4 bg-[#f5f7f1] rounded-xl text-xs muted leading-6">
             จองออนไลน์ รับที่เคาน์เตอร์
             <br />
@@ -714,7 +693,6 @@ export default function AppShell({
           </div>
 
         </aside>
-
 
         <div className="min-w-0 flex-1">
 
@@ -726,7 +704,6 @@ export default function AppShell({
                 {labels[page]}
               </span>
             </p>
-
 
             {user
               ? (
@@ -751,7 +728,6 @@ export default function AppShell({
                     </p>
 
                   </div>
-
 
                   <button
                     className="btn secondary text-xs"
@@ -803,7 +779,6 @@ export default function AppShell({
 
           </header>
 
-
           <main className="max-w-7xl mx-auto p-5 md:p-10">
 
             {
@@ -834,7 +809,6 @@ export default function AppShell({
                 </div>
               )
             }
-
 
             {notice && (
               <div
@@ -871,7 +845,6 @@ export default function AppShell({
               </div>
             )}
 
-
             {allowed
               ? children
               : (
@@ -886,7 +859,6 @@ export default function AppShell({
             }
 
           </main>
-
 
           <footer className="px-10 py-6 muted text-xs">
             LIBRARY SYSTEM · เรียนรู้ได้ทุกวัน ผ่านหนังสือทุกเล่ม

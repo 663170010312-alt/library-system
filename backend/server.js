@@ -339,27 +339,32 @@ app.use(
    LINE NOTIFICATION SCHEDULE
 ========================= */
 
-const lineNotificationTask =
-  cron.schedule(
-    '0 8 * * *',
-    async () => {
-      try {
-        await runLineNotifications();
-      } catch (error) {
-        console.error(
-          'LINE scheduled notification failed:',
-          error
-        );
-      }
-    },
-    {
-      timezone:
-        'Asia/Bangkok',
+
+const lineNotificationTask = cron.schedule(
+  '0 8 * * *',
+  async () => {
+    console.log(
+      '[LINE CRON] Started:',
+      new Date().toLocaleString('th-TH', {
+        timeZone: 'Asia/Bangkok',
+      })
+    );
+
+    try {
+      await runLineNotifications();
+      console.log('[LINE CRON] Finished successfully');
+    } catch (error) {
+      console.error('[LINE CRON] Failed:', error);
     }
-  );
+  },
+  {
+    timezone: 'Asia/Bangkok',
+    missedExecutionTolerance: 10_000,
+  }
+);
 
 console.log(
-  '✅ LINE notification schedule: every day at 08:00 Asia/Bangkok'
+  'LINE notification schedule: every day at 08:00 Asia/Bangkok'
 );
 
 
@@ -386,7 +391,14 @@ const server =
       );
     }
   );
-
+// ทดสอบการทำงานของระบบแจ้งเตือน
+runLineNotifications()
+  .then((result) => {
+    console.log('[LINE TEST] Result:', result);
+  })
+  .catch((error) => {
+    console.error('[LINE TEST] Failed:', error);
+  });
 
 /* =========================
    SHUTDOWN
