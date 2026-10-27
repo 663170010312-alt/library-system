@@ -1,3 +1,4 @@
+
 import { Router } from 'express';
 import {
   pool,
@@ -13,7 +14,6 @@ import {
 const router = Router();
 
 router.use(authenticate);
-
 
 /* =========================================================
    GET ALL BOOKS
@@ -71,10 +71,8 @@ router.get('/', async (req, res) => {
           b.description,
           b.price,
           b.cover_url,
-
           b.category_id,
           c.name AS category_name,
-
           b.total_copies,
 
           COUNT(
@@ -127,7 +125,6 @@ router.get('/', async (req, res) => {
   res.json(rows);
 });
 
-
 /* =========================================================
    GET ONE BOOK
 ========================================================= */
@@ -148,10 +145,8 @@ router.get('/:id', async (req, res) => {
           b.description,
           b.price,
           b.cover_url,
-
           b.category_id,
           c.name AS category_name,
-
           b.total_copies,
 
           COUNT(
@@ -232,7 +227,6 @@ router.get('/:id', async (req, res) => {
     copies: copiesResult.rows,
   });
 });
-
 
 /* =========================================================
    CREATE BOOK TITLE + COPIES
@@ -452,6 +446,59 @@ router.post(
   }
 );
 
+/* =========================================================
+   UPDATE BOOK COVER ONLY
+   เปลี่ยนปกโดยไม่กระทบการยืมหรือจำนวนเล่ม
+========================================================= */
+
+router.patch(
+  '/:id/cover',
+  allow('ADMIN'),
+  async (req, res) => {
+    const id =
+      positiveId(req.params.id);
+
+    const coverUrl =
+      req.body?.cover_url;
+
+    if (
+      typeof coverUrl !== 'string' ||
+      !coverUrl.trim() ||
+      coverUrl.length > 2048
+    ) {
+      throw httpError(
+        400,
+        'กรุณาระบุ URL รูปปกหนังสือที่ถูกต้อง'
+      );
+    }
+
+    const { rows } =
+      await pool.query(
+        `
+          UPDATE books
+
+          SET cover_url = $1
+
+          WHERE id = $2
+
+          RETURNING id, cover_url
+        `,
+        [
+          coverUrl.trim(),
+          id,
+        ]
+      );
+
+    if (!rows.length) {
+      throw httpError(
+        404,
+        'ไม่พบหนังสือ'
+      );
+    }
+
+    res.json(rows[0]);
+  }
+);
 
 /* =========================================================
    UPDATE BOOK TITLE
@@ -603,8 +650,8 @@ router.put(
       const activeCopies =
         copies.rows.filter(
           (copy) =>
-            copy.status !==
-            'RETIRED'
+            copy.status === 'AVAILABLE' ||
+            copy.status === 'BORROWED'
         );
 
       const currentCount =
@@ -792,7 +839,6 @@ router.put(
     }
   }
 );
-
 
 /* =========================================================
    DELETE BOOK

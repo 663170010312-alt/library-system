@@ -538,3 +538,61 @@ export type LineLinkConfirmResult = {
     email: string;
   };
 };
+
+export async function uploadBookCover(
+  file: File
+): Promise<string> {
+  const form = new FormData();
+  form.append('cover', file);
+
+  const token =
+    sessionStorage.getItem('library-token');
+
+  const response = await fetch(
+    `${API_URL}/uploads/cover`,
+    {
+      method: 'POST',
+      headers: {
+        'ngrok-skip-browser-warning': 'true',
+        ...(token
+          ? { Authorization: `Bearer ${token}` }
+          : {}),
+      },
+      body: form,
+    }
+  );
+
+  const result = await response
+    .json()
+    .catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      result.message || 'อัปโหลดรูปปกไม่สำเร็จ'
+    );
+  }
+
+  if (!result.url) {
+    throw new Error(
+      'เซิร์ฟเวอร์ไม่ได้ส่งตำแหน่งรูปปกกลับมา'
+    );
+  }
+
+  return result.url;
+}
+
+export function bookCoverSrc(
+  url: string | null | undefined
+): string {
+  if (!url) return '';
+
+  if (/^https?:\/\//i.test(url)) {
+    return url;
+  }
+
+  const base = API_URL.replace(/\/api\/?$/, '');
+
+  return `${base}${
+    url.startsWith('/') ? '' : '/'
+  }${url}`;
+}

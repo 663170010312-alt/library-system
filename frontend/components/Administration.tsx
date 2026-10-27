@@ -44,6 +44,12 @@ export default function Administration({
   const [categories, setCategories] =
     useState<Category[]>([]);
 
+  const [editingCategoryId, setEditingCategoryId] =
+    useState<number | null>(null);
+
+  const [editingCategoryName, setEditingCategoryName] =
+    useState('');
+
   const [reports, setReports] =
     useState<Reports | null>(null);
 
@@ -284,104 +290,125 @@ export default function Administration({
   if (mode === 'categories') {
     return (
       <div className="panel max-w-2xl space-y-5">
+        <div>
+          <h2 className="text-xl font-semibold">จัดการหมวดหมู่หนังสือ</h2>
+          <p className="muted text-sm mt-1">
+            เพิ่มหรือเปลี่ยนชื่อหมวดหมู่ โดยหนังสือที่อยู่ในหมวดหมู่เดิมยังคงอยู่
+          </p>
+        </div>
+
         <form
-          className="flex gap-3 items-end"
+          className="flex flex-wrap gap-3 items-end"
           onSubmit={async (e) => {
             e.preventDefault();
-
-            const form =
-              e.currentTarget;
-
-            if (
-              await save(
-                '/categories',
-                'POST',
-                Object.fromEntries(
-                  new FormData(form)
-                )
-              )
-            ) {
-              form.reset();
+            const form = e.currentTarget;
+            const name = String(new FormData(form).get('name') || '').trim();
+            if (!name) {
+              notify('กรุณากรอกชื่อหมวดหมู่', true);
+              return;
             }
+            const ok = await save('/categories', 'POST', { name });
+            if (ok) form.reset();
           }}
         >
-          <label className="flex-1">
+          <label className="flex-1 min-w-48">
             ชื่อหมวดหมู่ใหม่
-
-            <input
-              name="name"
-              required
-              maxLength={100}
-            />
+            <input name="name" required maxLength={100} />
           </label>
-
-          <button
-            className="btn"
-            disabled={busy}
-          >
-            เพิ่ม
+          <button type="submit" className="btn" disabled={busy}>
+            + เพิ่มหมวดหมู่
           </button>
         </form>
 
-        {categories.map((c) => (
-          <form
-            key={`${c.id}-${c.name}`}
-            className="flex items-end gap-2"
-            onSubmit={async (e) => {
-              e.preventDefault();
-
-              await save(
-                `/categories/${c.id}`,
-                'PUT',
-                Object.fromEntries(
-                  new FormData(
-                    e.currentTarget
-                  )
-                )
-              );
-            }}
-          >
-            <label className="flex-1">
-              หมวดหมู่ #{c.id}
-
-              <input
-                name="name"
-                defaultValue={
-                  c.name
-                }
-                maxLength={100}
-                required
-              />
-            </label>
-
-            <button
-              className="btn secondary"
-              disabled={busy}
-            >
-              บันทึก
-            </button>
-
-            <button
-              type="button"
-              className="btn danger"
-              disabled={busy}
-              onClick={() => {
-                if (
-                  confirm(
-                    `ลบหมวดหมู่ “${c.name}”?`
-                  )
-                ) {
-                  save(
-                    `/categories/${c.id}`,
-                    'DELETE'
-                  );
-                }
-              }}
-            >
-              ลบ
-            </button>
-          </form>
-        ))}
+        <div className="space-y-3">
+          <h3 className="font-semibold">รายการหมวดหมู่ทั้งหมด ({categories.length})</h3>
+          {categories.map((category) => (
+            <div key={category.id} className="border rounded-lg p-4">
+              {editingCategoryId === category.id ? (
+                <form
+                  className="flex flex-wrap items-end gap-2"
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    const name = editingCategoryName.trim();
+                    if (!name) {
+                      notify('กรุณากรอกชื่อหมวดหมู่', true);
+                      return;
+                    }
+                    const ok = await save(
+                      `/categories/${category.id}`,
+                      'PUT',
+                      { name }
+                    );
+                    if (ok) {
+                      setEditingCategoryId(null);
+                      setEditingCategoryName('');
+                    }
+                  }}
+                >
+                  <label className="flex-1 min-w-48">
+                    แก้ไขชื่อหมวดหมู่ #{category.id}
+                    <input
+                      value={editingCategoryName}
+                      onChange={(e) => setEditingCategoryName(e.target.value)}
+                      maxLength={100}
+                      required
+                      autoFocus
+                    />
+                  </label>
+                  <button type="submit" className="btn" disabled={busy}>
+                    บันทึก
+                  </button>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditingCategoryId(null);
+                      setEditingCategoryName('');
+                    }}
+                  >
+                    ยกเลิก
+                  </button>
+                </form>
+              ) : (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">{category.name}</p>
+                    <p className="muted text-xs">หมวดหมู่ #{category.id}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="btn secondary"
+                      disabled={busy}
+                      onClick={() => {
+                        setEditingCategoryId(category.id);
+                        setEditingCategoryName(category.name);
+                      }}
+                    >
+                      แก้ไข
+                    </button>
+                    <button
+                      type="button"
+                      className="btn danger"
+                      disabled={busy}
+                      onClick={() => {
+                        if (window.confirm(`ลบหมวดหมู่ “${category.name}”?`)) {
+                          save(`/categories/${category.id}`, 'DELETE');
+                        }
+                      }}
+                    >
+                      ลบ
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+          {categories.length === 0 && (
+            <p className="muted text-center py-5">ยังไม่มีหมวดหมู่หนังสือ</p>
+          )}
+        </div>
       </div>
     );
   }

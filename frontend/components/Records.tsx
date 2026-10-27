@@ -223,6 +223,18 @@ useEffect(() => {
     };
   }, [mode, revision]);
 
+  // โหลดรายการล่าสุดเมื่อกลับมาที่แท็บ เพื่อให้ประวัติแสดงรายการที่เพิ่งยืม
+  useEffect(() => {
+    if (mode !== 'history') return;
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        setRevision((v) => v + 1);
+      }
+    };
+    document.addEventListener('visibilitychange', refresh);
+    return () => document.removeEventListener('visibilitychange', refresh);
+  }, [mode]);
+
   async function action(
     path: string,
     method: string,
@@ -544,16 +556,21 @@ const visibleReservations = reservations.filter(
     matchesDate(r)
 );
 
+// ประวัติยืม/คืนแสดงทั้งรายการที่กำลังยืมและคืนแล้ว
+// ส่วนหน้ายืม-คืนและเกินกำหนดยังคงกรองตามสถานะเดิม
 const filtered = loans.filter(
   (l) =>
     (mode === 'history'
-      ? l.status === 'RETURNED'
+      ? true
       : mode === 'overdue'
         ? l.overdue
         : l.status === 'BORROWED') &&
     matchesSearch(l) &&
     matchesCategory(l) &&
     matchesDate(l)
+).sort((a, b) =>
+  new Date(b.borrowed_at).getTime() - new Date(a.borrowed_at).getTime() ||
+  b.id - a.id
 );
 
 

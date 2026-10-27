@@ -2,7 +2,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { api, Book, Category } from '@/lib/api';
+import { api, Book, Category, bookCoverSrc } from '@/lib/api';
 import Link from 'next/link';
 
 export default function BooksPage() {
@@ -12,6 +12,7 @@ export default function BooksPage() {
   const [category, setCategory] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [brokenCovers, setBrokenCovers] = useState<number[]>([]);
 
   useEffect(() => {
     api<Category[]>('/categories')
@@ -31,6 +32,7 @@ export default function BooksPage() {
         .then(data => {
           if (active) {
             setBooks(data);
+            setBrokenCovers([]);
             setError('');
           }
         })
@@ -149,9 +151,20 @@ export default function BooksPage() {
                   ][index % 3]
                 }`}
               >
-                <div className="border-l-4 border-library/40 bg-white/70 shadow-md px-5 py-6 w-36 text-center text-library font-semibold line-clamp-3">
-                  {book.title}
-                </div>
+                {book.cover_url && !brokenCovers.includes(book.id) ? (
+                  <img
+                    src={bookCoverSrc(book.cover_url)}
+                    alt={`ปกหนังสือ ${book.title}`}
+                    className="h-full max-w-full object-contain rounded shadow-md"
+                    loading="lazy"
+                    onError={() => {
+                      console.error('โหลดรูปปกไม่ได้:', book.title, bookCoverSrc(book.cover_url));
+                      setBrokenCovers(prev => prev.includes(book.id) ? prev : [...prev, book.id]);
+                    }}
+                  />
+                ) : (
+                  <div className="border-l-4 border-library/40 bg-white/70 shadow-md px-5 py-6 w-36 text-center text-library font-semibold line-clamp-3">{book.title}</div>
+                )}
               </div>
 
               <span className="text-xs muted">

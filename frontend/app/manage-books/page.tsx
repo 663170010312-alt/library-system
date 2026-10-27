@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { api, Book, Category } from '@/lib/api';
+import { api, Book, Category, uploadBookCover, bookCoverSrc } from '@/lib/api';
 import { useApp } from '@/components/AppShell';
 
 type SearchField =
@@ -22,6 +22,8 @@ export default function ManageBooksPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [revision, setRevision] = useState(0);
+  const [coverFile, setCoverFile] = useState<File | null>(null);
+  const [coverPreview, setCoverPreview] = useState('');
 
   // เพิ่มระบบค้นหา
   const [search, setSearch] = useState('');
@@ -82,16 +84,39 @@ export default function ManageBooksPage() {
   function closeForm() {
     setShowForm(false);
     setEditing(null);
+    setCoverFile(null);
+    setCoverPreview('');
   }
 
   function openEditForm(book: Book) {
     setEditing(book);
+    setCoverFile(null);
+    setCoverPreview('');
     setShowForm(true);
 
     window.scrollTo({
       top: 0,
       behavior: 'smooth',
     });
+  }
+
+  async function handleCoverChange(book: Book, file: File | undefined) {
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+      notify('รองรับ JPG, PNG, WebP ขนาดไม่เกิน 5 MB', true);
+      return;
+    }
+    setBusy(true);
+    try {
+      const cover_url = await uploadBookCover(file);
+      await api(`/books/${book.id}/cover`, 'PATCH', { cover_url });
+      setRevision((value) => value + 1);
+      notify(`เปลี่ยนรูปปก “${book.title}” แล้ว โดยไม่แก้ไขจำนวนเล่มหรือการยืมคืน`);
+    } catch (err) {
+      notify((err as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleDelete(book: Book) {
@@ -124,6 +149,8 @@ export default function ManageBooksPage() {
         className="btn"
         onClick={() => {
           setEditing(null);
+          setCoverFile(null);
+          setCoverPreview('');
           setShowForm(true);
         }}
       >
@@ -185,6 +212,7 @@ export default function ManageBooksPage() {
             };
 
             try {
+              if (coverFile) data.cover_url = await uploadBookCover(coverFile);
               await api(
                 editing
                   ? `/books/${editing.id}`
@@ -311,15 +339,38 @@ export default function ManageBooksPage() {
             />
           </label>
 
-          <label>
-            รูปปกหนังสือ
-            <input
-              name="cover_url"
-              type="text"
-              placeholder="/uploads/covers/book.jpg หรือ URL รูปภาพ"
-              defaultValue={editing?.cover_url || ''}
-            />
-          </label>
+          <div className="sm:col-span-2 space-y-3">
+            <label>
+              รูปปกหนังสือ (JPG, PNG, WebP ไม่เกิน 5 MB)
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] || null;
+                  if (file && (file.size > 5 * 1024 * 1024 || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type))) {
+                    notify('กรุณาเลือก JPG, PNG หรือ WebP ขนาดไม่เกิน 5 MB', true);
+                    e.target.value = '';
+                    setCoverFile(null);
+                    setCoverPreview('');
+                    return;
+                  }
+                  setCoverFile(file);
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = () => setCoverPreview(String(reader.result || ''));
+                    reader.readAsDataURL(file);
+                  } else setCoverPreview('');
+                }}
+              />
+            </label>
+            <label>
+              หรือใส่ URL รูปปกหนังสือ
+              <input name="cover_url" type="text" placeholder="https://..." defaultValue={editing?.cover_url || ''} />
+            </label>
+            {(coverPreview || editing?.cover_url) && (
+              <img src={coverPreview || bookCoverSrc(editing?.cover_url)} alt="ตัวอย่างปกหนังสือ" className="h-48 w-36 rounded-lg object-cover border" />
+            )}
+          </div>
 
           <label className="sm:col-span-2">
             รายละเอียด
@@ -330,20 +381,6 @@ export default function ManageBooksPage() {
               defaultValue={editing?.description || ''}
             />
           </label>
-
-          {editing?.cover_url && (
-            <div className="sm:col-span-2">
-              <p className="muted text-sm mb-2">
-                ตัวอย่างรูปปกปัจจุบัน
-              </p>
-
-              <img
-                src={editing.cover_url}
-                alt={`ปกหนังสือ ${editing.title}`}
-                className="h-48 w-36 rounded-lg object-cover border"
-              />
-            </div>
-          )}
 
           {/* ข้อมูลจำนวนเล่มขณะแก้ไข */}
           {editing && (
@@ -521,7 +558,10 @@ export default function ManageBooksPage() {
               return (
                 <tr key={book.id}>
                   <td>
-                    <strong>{book.title}</strong>
+                    <div className="flex items-center gap-3">
+                      {book.cover_url ? <img src={bookCoverSrc(book.cover_url)} alt={`ปก ${book.title}`} className="w-12 h-16 object-cover rounded border" /> : <div className="w-12 h-16 bg-gray-100 rounded border flex items-center justify-center text-xs muted">ไม่มีปก</div>}
+                      <strong>{book.title}</strong>
+                    </div>
 
                     <p className="muted text-xs">
                       {book.author}
@@ -579,6 +619,20 @@ export default function ManageBooksPage() {
 
                   <td>
                     <div className="flex flex-wrap gap-2">
+                      <label className={`btn secondary ${busy ? 'opacity-50' : 'cursor-pointer'}`}>
+                        เปลี่ยนปก
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          className="hidden"
+                          disabled={busy}
+                          onChange={(e) => {
+                            void handleCoverChange(book, e.target.files?.[0]);
+                            e.target.value = '';
+                          }}
+                        />
+                      </label>
+
                       <button
                         type="button"
                         className="btn secondary"
