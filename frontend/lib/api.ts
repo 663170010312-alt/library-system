@@ -590,46 +590,69 @@ export function bookCoverSrc(
 
   const imageUrl = url.trim();
 
+  if (imageUrl.startsWith('data:image/')) {
+    return imageUrl;
+  }
+
+  const marker = '/uploads/covers/';
+  const index = imageUrl.indexOf(marker);
+
+  if (index !== -1) {
+    const filename = imageUrl
+      .slice(index + marker.length)
+      .split('?')[0]
+      .split('#')[0];
+
+    const allowedChars =
+      'abcdefghijklmnopqrstuvwxyz' +
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZ' +
+      '0123456789._-';
+
+    const validName =
+      filename.length > 0 &&
+      !filename.includes('..') &&
+      [...filename].every((char) =>
+        allowedChars.includes(char)
+      );
+
+    const validExtension = [
+      '.jpg',
+      '.jpeg',
+      '.png',
+      '.webp',
+    ].some((ext) =>
+      filename.toLowerCase().endsWith(ext)
+    );
+
+    if (validName && validExtension) {
+      return (
+        '/api/book-cover?file=' +
+        encodeURIComponent(filename)
+      );
+    }
+  }
+
+  if (
+    imageUrl.startsWith('http://') ||
+    imageUrl.startsWith('https://')
+  ) {
+    return imageUrl;
+  }
+
   const apiUrl =
     process.env.NEXT_PUBLIC_API_URL ||
     'http://localhost:4000/api';
 
   const backendOrigin = apiUrl.endsWith('/api')
     ? apiUrl.slice(0, -4)
-    : apiUrl.replace(/\/$/, '');
+    : apiUrl.endsWith('/')
+      ? apiUrl.slice(0, -1)
+      : apiUrl;
 
-  // รองรับรูปแบบ Data URL
-  if (imageUrl.startsWith('data:image/')) {
-    return imageUrl;
-  }
+  const path = imageUrl.startsWith('/')
+    ? imageUrl
+    : '/' + imageUrl;
 
-  try {
-    // กรณีเป็น URL เต็ม
-    if (
-      imageUrl.startsWith('http://') ||
-      imageUrl.startsWith('https://')
-    ) {
-      const parsed = new URL(imageUrl);
-
-      if (
-        parsed.hostname === 'localhost' ||
-        parsed.hostname === '127.0.0.1'
-      ) {
-        return backendOrigin + parsed.pathname + parsed.search;
-      }
-
-      return imageUrl;
-    }
-
-    // กรณีเป็น Path รูปภาพ
-    const cleanPath = imageUrl.startsWith('/')
-      ? imageUrl
-      : '/' + imageUrl;
-
-    return backendOrigin + cleanPath;
-  } catch {
-    return '';
-  }
+  return backendOrigin + path;
 }
-
 
