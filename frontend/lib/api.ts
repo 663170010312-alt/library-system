@@ -584,15 +584,52 @@ export async function uploadBookCover(
 export function bookCoverSrc(
   url: string | null | undefined
 ): string {
-  if (!url) return '';
-
-  if (/^https?:\/\//i.test(url)) {
-    return url;
+  if (!url || !url.trim()) {
+    return '';
   }
 
-  const base = API_URL.replace(/\/api\/?$/, '');
+  const imageUrl = url.trim();
 
-  return `${base}${
-    url.startsWith('/') ? '' : '/'
-  }${url}`;
+  const apiUrl =
+    process.env.NEXT_PUBLIC_API_URL ||
+    'http://localhost:4000/api';
+
+  const backendOrigin = apiUrl.endsWith('/api')
+    ? apiUrl.slice(0, -4)
+    : apiUrl.replace(/\/$/, '');
+
+  // รองรับรูปแบบ Data URL
+  if (imageUrl.startsWith('data:image/')) {
+    return imageUrl;
+  }
+
+  try {
+    // กรณีเป็น URL เต็ม
+    if (
+      imageUrl.startsWith('http://') ||
+      imageUrl.startsWith('https://')
+    ) {
+      const parsed = new URL(imageUrl);
+
+      if (
+        parsed.hostname === 'localhost' ||
+        parsed.hostname === '127.0.0.1'
+      ) {
+        return backendOrigin + parsed.pathname + parsed.search;
+      }
+
+      return imageUrl;
+    }
+
+    // กรณีเป็น Path รูปภาพ
+    const cleanPath = imageUrl.startsWith('/')
+      ? imageUrl
+      : '/' + imageUrl;
+
+    return backendOrigin + cleanPath;
+  } catch {
+    return '';
+  }
 }
+
+
